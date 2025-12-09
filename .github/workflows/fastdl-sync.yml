@@ -1,0 +1,98 @@
+name: Sync FastDL from FTP
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 */2 * * *" # every 2 hours, adjust as needed
+
+jobs:
+  sync-fastdl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lftp bzip2
+
+      - name: Mirror SRCDS content from FTP
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
+        run: |
+          set -e
+
+          rm -rf ftp_mirror
+          mkdir -p ftp_mirror
+
+          lftp -u "${FTP_USERNAME},${FTP_PASSWORD}" "${FTP_HOST}" <<EOF
+          set ssl:verify-certificate no
+          set ftp:passive-mode true
+          mirror --verbose "${FTP_REMOTE_PATH}" ftp_mirror
+          quit
+          EOF
+
+      - name: Prepare FastDL tree
+        run: |
+          set -e
+
+          # Clean existing FastDL tree in repo
+          rm -rf cstrike
+          mkdir -p cstrike
+
+          # If your FTP_REMOTE_PATH already *is* cstrike, this copies 1:1.
+          # Otherwise adjust src paths below.
+          if [ -d "ftp_mirror/cstrike" ]; then
+            cp -a ftp_mirror/cstrike/. cstrike/
+          else
+            # fallback; adjust for your structure if needed
+            cp -a ftp_mirror/. cstrike/
+          fi
+
+          # Optionally prune stuff you never want on FastDL (logs, cfg, etc.)
+          rm -rf cstrike/cfg cstrike/logs cstrike/addons || true
+
+      - name: BZ2 compress custom content
+        run: |
+          set -e
+          # Compress selected file types in-place for FastDL.
+          # Both plain and .bz2 will exist; Source prefers .bz2 when present.
+          find cstrike -type f \( \
+            -name "*.bsp" -o \
+            -name "*.nav" -o \
+            -name "*.mdl" -o \
+            -name "*.vtx" -o \
+            -name "*.vvd" -o \
+            -name "*.phy" -o \
+            -name "*.vtf" -o \
+            -name "*.vmt" -o \
+            -name "*.wav" -o \
+            -name "*.mp3" \
+          \) -print0 | xargs -0 -n1 -P4 bzip2 -fz
+
+      - name: Commit and push if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+
+          git status
+
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add cstrike
+          git commit -m "Update FastDL from FTP $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          git push origin HEAD
