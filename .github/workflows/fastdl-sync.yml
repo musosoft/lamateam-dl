@@ -45,11 +45,11 @@ jobs:
           set ftp:passive-mode true
 
           mirror --verbose --only-newer \
-            --include ^maps/ \
-            --include ^materials/ \
-            --include ^models/ \
-            --include ^sound/ \
-            --exclude .* \
+            --include '^maps/' \
+            --include '^materials/' \
+            --include '^models/' \
+            --include '^sound/' \
+            --exclude '.*' \
             "${FTP_REMOTE_PATH}" ftp_mirror
 
           quit
