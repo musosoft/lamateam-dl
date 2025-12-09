@@ -44,13 +44,12 @@ jobs:
           set ssl:verify-certificate no
           set ftp:passive-mode true
 
-          # ONLY mirror real CS:S asset directories
           mirror --verbose --only-newer \
-            --include "maps/" \
-            --include "materials/" \
-            --include "models/" \
-            --include "sound/" \
-            --exclude "*" \
+            --include ^maps/ \
+            --include ^materials/ \
+            --include ^models/ \
+            --include ^sound/ \
+            --exclude .* \
             "${FTP_REMOTE_PATH}" ftp_mirror
 
           quit
