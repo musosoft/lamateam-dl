@@ -64,14 +64,14 @@ jobs:
 
           # 2) Query FTP maps dir, grab listing including test_speakers.bsp
           lftp -u "${FTP_USERNAME},${FTP_PASSWORD}" "${FTP_HOST}" <<EOF > "$TMP_LIST"
-set ssl:verify-certificate no
-set ftp:passive-mode true
-set cmd:fail-exit yes
-cd "${FTP_REMOTE_PATH}/maps"
-cls -l test_speakers.bsp
-cls -l
-bye
-EOF
+          set ssl:verify-certificate no
+          set ftp:passive-mode true
+          set cmd:fail-exit yes
+          cd "${FTP_REMOTE_PATH}/maps"
+          cls -l test_speakers.bsp
+          cls -l
+          bye
+          EOF
 
           if grep -q "test_speakers.bsp" "$TMP_LIST"; then
             TS_SIG="$(awk '/test_speakers\.bsp$/ {print $(NF-3)" "$(NF-2)" "$(NF-1); exit}' "$TMP_LIST")"
@@ -114,64 +114,64 @@ EOF
           echo "Connecting to FTP and mirroring only maps/materials/models/sound/resource"
 
           lftp -u "${FTP_USERNAME},${FTP_PASSWORD}" "${FTP_HOST}" <<EOF
-set ssl:verify-certificate no
-set ftp:passive-mode true
-set cmd:fail-exit yes
+          set ssl:verify-certificate no
+          set ftp:passive-mode true
+          set cmd:fail-exit yes
 
-cd "${FTP_REMOTE_PATH}"
+          cd "${FTP_REMOTE_PATH}"
 
-echo "=== Mirroring maps -> ftp_mirror/maps ==="
-mirror --verbose --only-newer \
-  --include-glob="*.bsp" \
-  --include-glob="*.nav" \
-  --include-glob="*.txt" \
-  --include-glob="*.cfg" \
-  --include-glob="*.res" \
-  --include-glob="*.dat" \
-  --include-glob="*.kv" \
-  --include-glob="*.lst" \
-  --exclude-glob-from=".lftp-exclude-glob.txt" \
-  maps ftp_mirror/maps
+          echo "=== Mirroring maps -> ftp_mirror/maps ==="
+          mirror --verbose --only-newer \
+            --include-glob="*.bsp" \
+            --include-glob="*.nav" \
+            --include-glob="*.txt" \
+            --include-glob="*.cfg" \
+            --include-glob="*.res" \
+            --include-glob="*.dat" \
+            --include-glob="*.kv" \
+            --include-glob="*.lst" \
+            --exclude-glob-from=".lftp-exclude-glob.txt" \
+            maps ftp_mirror/maps
 
-echo "=== Mirroring materials -> ftp_mirror/materials ==="
-mirror --verbose --only-newer \
-  --include-glob="*.vmt" \
-  --include-glob="*.vtf" \
-  --include-glob="*.png" \
-  --include-glob="*.tga" \
-  --include-glob="*.vtz" \
-  --exclude-glob-from=".lftp-exclude-glob.txt" \
-  materials ftp_mirror/materials
+          echo "=== Mirroring materials -> ftp_mirror/materials ==="
+          mirror --verbose --only-newer \
+            --include-glob="*.vmt" \
+            --include-glob="*.vtf" \
+            --include-glob="*.png" \
+            --include-glob="*.tga" \
+            --include-glob="*.vtz" \
+            --exclude-glob-from=".lftp-exclude-glob.txt" \
+            materials ftp_mirror/materials
 
-echo "=== Mirroring models -> ftp_mirror/models ==="
-mirror --verbose --only-newer \
-  --include-glob="*.mdl" \
-  --include-glob="*.vvd" \
-  --include-glob="*.vtx" \
-  --include-glob="*.phy" \
-  --exclude-glob-from=".lftp-exclude-glob.txt" \
-  models ftp_mirror/models
-
-echo "=== Mirroring sound -> ftp_mirror/sound ==="
-mirror --verbose --only-newer \
-  --include-glob="*.wav" \
-  --include-glob="*.mp3" \
-  --include-glob="*.ogg" \
-  --exclude-glob-from=".lftp-exclude-glob.txt" \
-  sound ftp_mirror/sound
-
-echo "=== Mirroring resource -> ftp_mirror/resource ==="
-mirror --verbose --only-newer \
-  --include-glob="*.res" \
-  --include-glob="*.cfg" \
-  --include-glob="*.txt" \
-  --include-glob="*.ttf" \
-  --include-glob="*.otf" \
-  --exclude-glob-from=".lftp-exclude-glob.txt" \
-  resource ftp_mirror/resource
-
-bye
-EOF
+          echo "=== Mirroring models -> ftp_mirror/models ==="
+          mirror --verbose --only-newer \
+            --include-glob="*.mdl" \
+            --include-glob="*.vvd" \
+            --include-glob="*.vtx" \
+            --include-glob="*.phy" \
+            --exclude-glob-from=".lftp-exclude-glob.txt" \
+            models ftp_mirror/models
+        
+          echo "=== Mirroring sound -> ftp_mirror/sound ==="
+          mirror --verbose --only-newer \
+            --include-glob="*.wav" \
+            --include-glob="*.mp3" \
+            --include-glob="*.ogg" \
+            --exclude-glob-from=".lftp-exclude-glob.txt" \
+            sound ftp_mirror/sound
+        
+          echo "=== Mirroring resource -> ftp_mirror/resource ==="
+          mirror --verbose --only-newer \
+            --include-glob="*.res" \
+            --include-glob="*.cfg" \
+            --include-glob="*.txt" \
+            --include-glob="*.ttf" \
+            --include-glob="*.otf" \
+            --exclude-glob-from=".lftp-exclude-glob.txt" \
+            resource ftp_mirror/resource
+        
+          bye
+          EOF
 
           echo "==== FTP MIRROR RESULT (top-level) ===="
           ls -la ftp_mirror || true
