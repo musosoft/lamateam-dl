@@ -32,30 +32,31 @@ jobs:
         run: |
           echo "::group::Timestamp Calculation"
           
-          # 1. Connect and get the date of the reference valve map
-          # We use cls with a specific date format to ensure parsing works
           echo "Fetching timestamp of maps/test_speakers.bsp..."
           
-          RAW_OUTPUT=$(lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls --date-format='%Y-%m-%d %H:%M:%S' -1 maps/test_speakers.bsp; quit" $FTP_HOST)
+          # FIX: Removed invalid --date-format flag. 
+          # We use 'cls -l' to get the standard long listing.
+          RAW_OUTPUT=$(lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps/test_speakers.bsp; quit" $FTP_HOST)
           
-          # Clean up output (lftp might return file permissions, we just want the date)
-          # Assuming output format usually contains date before filename
-          # We extract the date pattern YYYY-MM-DD HH:MM:SS
-          REF_DATE=$(echo "$RAW_OUTPUT" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1)
+          echo "Raw FTP Output: $RAW_OUTPUT"
 
-          if [ -z "$REF_DATE" ]; then
-            echo "Error: Could not determine server install date from test_speakers.bsp."
-            echo "Defaulting to full sync (might be slow)."
+          # Parse the date using Regex. 
+          # Matches standard Unix ls dates: "Mon DD HH:MM" (Recent) or "Mon DD YYYY" (Old)
+          # Regex logic: 3 letters (Month) -> space -> 1-2 digits (Day) -> space -> Time OR Year
+          EXTRACTED_DATE=$(echo "$RAW_OUTPUT" | grep -oE '[A-Za-z]{3}\s+[0-9]{1,2}\s+([0-9]{4}|[0-9]{1,2}:[0-9]{2})' | head -n 1)
+
+          if [ -z "$EXTRACTED_DATE" ]; then
+            echo "Error: Could not parse date from FTP output."
+            echo "Defaulting to full sync."
             echo "SYNC_OPTS=" >> $GITHUB_ENV
           else
-            echo "Server Install Date (Ref): $REF_DATE"
+            echo "Server Ref Date: $EXTRACTED_DATE"
             
-            # 2. Add 30 minutes to the install date
-            # This creates our "Safe Zone". Anything older than this is Valve content.
-            CUTOFF_DATE=$(date -d "$REF_DATE + 30 minutes" "+%Y-%m-%d %H:%M:%S")
-            echo "Custom Content Cutoff:     $CUTOFF_DATE"
+            # Calculate +30 minutes
+            # 'date -d' is smart enough to parse "Dec 12 10:00" automatically
+            CUTOFF_DATE=$(date -d "$EXTRACTED_DATE + 30 minutes" "+%Y-%m-%d %H:%M:%S")
+            echo "Safe Zone Start: $CUTOFF_DATE"
             
-            # 3. Set environment variable for the next step
             echo "SYNC_OPTS=--newer-than='$CUTOFF_DATE'" >> $GITHUB_ENV
           fi
           echo "::endgroup::"
