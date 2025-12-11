@@ -34,9 +34,8 @@ jobs:
           
           echo "Fetching timestamp of maps/test_speakers.bsp..."
           
-          # FIX: Removed invalid --date-format flag. 
           # We use 'cls -l' to get the standard long listing.
-          RAW_OUTPUT=$(lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps/test_speakers.bsp; quit" $FTP_HOST)
+          RAW_OUTPUT=$(lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps/test_speakers.bsp; quit" "$FTP_HOST")
           
           echo "Raw FTP Output: $RAW_OUTPUT"
 
@@ -48,16 +47,26 @@ jobs:
           if [ -z "$EXTRACTED_DATE" ]; then
             echo "Error: Could not parse date from FTP output."
             echo "Defaulting to full sync."
-            echo "SYNC_OPTS=" >> $GITHUB_ENV
+            echo "SYNC_OPTS=" >> "$GITHUB_ENV"
           else
-            echo "Server Ref Date: $EXTRACTED_DATE"
+            echo "Server Ref Date (raw): $EXTRACTED_DATE"
+
+            # Decide if we got "Mon DD YYYY" (no time) or "Mon DD HH:MM" (with time)
+            if echo "$EXTRACTED_DATE" | grep -q ':'; then
+              echo "Parsed format: with time (Mon DD HH:MM)"
+              # Recent-style entry: add 30 minutes on top of the exact time
+              CUTOFF_DATE=$(date -d "$EXTRACTED_DATE + 30 minutes" "+%Y-%m-%d %H:%M:%S")
+            else
+              echo "Parsed format: date only (Mon DD YYYY)"
+              # Old-style entry: only day resolution. 
+              # Treat the whole EXTRACTED_DATE day as "default content day" and
+              # start safe zone at the beginning of the *next* day.
+              CUTOFF_DATE=$(date -d "$EXTRACTED_DATE + 1 day" "+%Y-%m-%d 00:00:00")
+            fi
+
+            echo "Safe Zone Start (used for --newer-than): $CUTOFF_DATE"
             
-            # Calculate +30 minutes
-            # 'date -d' is smart enough to parse "Dec 12 10:00" automatically
-            CUTOFF_DATE=$(date -d "$EXTRACTED_DATE + 30 minutes" "+%Y-%m-%d %H:%M:%S")
-            echo "Safe Zone Start: $CUTOFF_DATE"
-            
-            echo "SYNC_OPTS=--newer-than='$CUTOFF_DATE'" >> $GITHUB_ENV
+            echo "SYNC_OPTS=--newer-than='$CUTOFF_DATE'" >> "$GITHUB_ENV"
           fi
           echo "::endgroup::"
 
@@ -73,14 +82,13 @@ jobs:
           
           echo "Starting sync with options: $SYNC_OPTS"
           
-          lftp -u "$FTP_USER,$FTP_PASS" $FTP_HOST <<EOF
+          lftp -u "$FTP_USER,$FTP_PASS" "$FTP_HOST" <<EOF
           set ssl:verify-certificate no
           set ftp:passive-mode true
           cd "$REMOTE_PATH"
           
           # We mirror specific folders using the computed time filter
-          # --delete is removed temporarily to prevent deleting local files if the filter excludes them this run
-          # --verbose=0 keeps logs clean
+          # --delete is removed to prevent deleting local files if the filter excludes them this run
           
           mirror --continue $SYNC_OPTS --parallel=10 --verbose=1 maps cstrike/maps
           mirror --continue $SYNC_OPTS --parallel=10 --verbose=1 materials cstrike/materials
@@ -94,12 +102,11 @@ jobs:
       - name: Compress & Clean
         run: |
           echo "::group::Compression"
-          # Compress new files to .bz2
+          # Compress new files to .bz2 and remove originals
           find cstrike -type f \( -name "*.bsp" -o -name "*.nav" -o -name "*.mdl" -o -name "*.wav" -o -name "*.vmt" -o -name "*.vtf" \) -not -name "*.bz2" | while read FILE; do
             if [ ! -f "${FILE}.bz2" ]; then
               echo "Compressing: $FILE"
               bzip2 -z -k "$FILE"
-              # Delete the original uncompressed file to keep repo small
               rm "$FILE"
             fi
           done
