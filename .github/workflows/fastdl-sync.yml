@@ -1,15 +1,15 @@
-name: Sync & Update FastDL
+name: Smart FastDL Sync
 
 on:
-  workflow_dispatch: # Allows manual trigger
+  workflow_dispatch:
   schedule:
-    - cron: '0 4 * * *' # Runs automatically every day at 4 AM UTC
+    - cron: '0 4 * * *' # Runs daily at 4 AM
 
 permissions:
   contents: write
 
 jobs:
-  update-fastdl:
+  smart-sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -22,58 +22,91 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y lftp bzip2
 
-      - name: Download from Game Server (Quiet Mode)
+      - name: Calculate Sync Threshold
+        id: calc_date
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USERNAME }}
           FTP_PASS: ${{ secrets.FTP_PASSWORD }}
           REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
         run: |
-          echo "::group::FTP Synchronization"
+          echo "::group::Timestamp Calculation"
+          
+          # 1. Connect and get the date of the reference valve map
+          # We use cls with a specific date format to ensure parsing works
+          echo "Fetching timestamp of maps/test_speakers.bsp..."
+          
+          RAW_OUTPUT=$(lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls --date-format='%Y-%m-%d %H:%M:%S' -1 maps/test_speakers.bsp; quit" $FTP_HOST)
+          
+          # Clean up output (lftp might return file permissions, we just want the date)
+          # Assuming output format usually contains date before filename
+          # We extract the date pattern YYYY-MM-DD HH:MM:SS
+          REF_DATE=$(echo "$RAW_OUTPUT" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' | head -n 1)
+
+          if [ -z "$REF_DATE" ]; then
+            echo "Error: Could not determine server install date from test_speakers.bsp."
+            echo "Defaulting to full sync (might be slow)."
+            echo "SYNC_OPTS=" >> $GITHUB_ENV
+          else
+            echo "Server Install Date (Ref): $REF_DATE"
+            
+            # 2. Add 30 minutes to the install date
+            # This creates our "Safe Zone". Anything older than this is Valve content.
+            CUTOFF_DATE=$(date -d "$REF_DATE + 30 minutes" "+%Y-%m-%d %H:%M:%S")
+            echo "Custom Content Cutoff:     $CUTOFF_DATE"
+            
+            # 3. Set environment variable for the next step
+            echo "SYNC_OPTS=--newer-than='$CUTOFF_DATE'" >> $GITHUB_ENV
+          fi
+          echo "::endgroup::"
+
+      - name: Download Custom Content Only
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USERNAME }}
+          FTP_PASS: ${{ secrets.FTP_PASSWORD }}
+          REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
+        run: |
+          echo "::group::FTP Smart Sync"
           mkdir -p cstrike
           
-          # Connects to FTP and syncs specifically fastdl relevant folders
-          # --verbose is removed to reduce log spam
-          # --delete ensures if you delete a map on the server, it is deleted here
+          echo "Starting sync with options: $SYNC_OPTS"
           
           lftp -u "$FTP_USER,$FTP_PASS" $FTP_HOST <<EOF
           set ssl:verify-certificate no
           set ftp:passive-mode true
           cd "$REMOTE_PATH"
-          mirror --continue --delete --only-newer --parallel=10 maps cstrike/maps
-          mirror --continue --delete --only-newer --parallel=10 materials cstrike/materials
-          mirror --continue --delete --only-newer --parallel=10 models cstrike/models
-          mirror --continue --delete --only-newer --parallel=10 sound cstrike/sound
-          mirror --continue --delete --only-newer --parallel=10 resource cstrike/resource
+          
+          # We mirror specific folders using the computed time filter
+          # --delete is removed temporarily to prevent deleting local files if the filter excludes them this run
+          # --verbose=0 keeps logs clean
+          
+          mirror --continue $SYNC_OPTS --parallel=10 --verbose=1 maps cstrike/maps
+          mirror --continue $SYNC_OPTS --parallel=10 --verbose=1 materials cstrike/materials
+          mirror --continue $SYNC_OPTS --parallel=10 --verbose=1 models cstrike/models
+          mirror --continue $SYNC_OPTS --parallel=10 --verbose=1 sound cstrike/sound
+          mirror --continue $SYNC_OPTS --parallel=10 --verbose=1 resource cstrike/resource
           quit
           EOF
-          echo "FTP Download Complete."
           echo "::endgroup::"
 
-      - name: Compress Files for FastDL (.bz2)
+      - name: Compress & Clean
         run: |
-          echo "::group::Compression Status"
-          # Find specific game files that are NOT yet compressed and compress them
-          # This loop checks for .bsp, .nav, .mdl, .wav, .vmt, .vtf
-          
+          echo "::group::Compression"
+          # Compress new files to .bz2
           find cstrike -type f \( -name "*.bsp" -o -name "*.nav" -o -name "*.mdl" -o -name "*.wav" -o -name "*.vmt" -o -name "*.vtf" \) -not -name "*.bz2" | while read FILE; do
             if [ ! -f "${FILE}.bz2" ]; then
               echo "Compressing: $FILE"
               bzip2 -z -k "$FILE"
+              # Delete the original uncompressed file to keep repo small
+              rm "$FILE"
             fi
           done
-          
-          # Optional: Remove the uncompressed files to save GitHub storage space
-          # If you keep both, GitHub Pages might run out of space quickly.
-          # Uncomment the line below to delete original files after compression:
-          # find cstrike -type f \( -name "*.bsp" -o -name "*.nav" -o -name "*.mdl" -o -name "*.wav" \) -delete
-          
-          echo "Compression Complete."
           echo "::endgroup::"
 
-      - name: Commit and Push Changes
+      - name: Push Updates
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "FastDL Auto-Sync: Updated Maps & Assets"
+          commit_message: "FastDL: Synced custom content"
           branch: main
           file_pattern: 'cstrike/**'
