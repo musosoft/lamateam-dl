@@ -11,119 +11,58 @@ permissions:
 jobs:
   smart-sync:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
           fetch-depth: 0
 
       - name: Install Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y lftp bzip2
+          sudo apt-get install -y lftp bzip2 rsync
 
-      - name: Build exclude lists
-        env:
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USERNAME }}
-          FTP_PASS: ${{ secrets.FTP_PASSWORD }}
-          REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
+      - name: Build excludes from repo (prevent re-download)
         run: |
           set -euo pipefail
           mkdir -p _excludes
 
-          for d in maps materials models sound resource; do
+          for d in maps materials models sound resource_overviews; do
             : > "_excludes/${d}.txt"
           done
 
-          echo "::group::Reference listing (maps/test_speakers.bsp)"
-          RAW_REF=$(lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps/test_speakers.bsp; quit" "$FTP_HOST")
-          echo "Raw: $RAW_REF"
-
-          # Parse Date Parts
-          REF_DAY=$(echo "$RAW_REF" | grep -oE '[A-Za-z]{3}\s+[0-9]{1,2}' | head -n 1 || true)
-          
-          # Check for HH:MM pattern (Recent file)
-          REF_HAS_TIME=0
-          if echo "$RAW_REF" | grep -qE '[0-9]{1,2}:[0-9]{2}'; then
-            REF_HAS_TIME=1
-          fi
-          
-          # Check for YYYY pattern (Old file)
-          REF_HAS_YEAR=0
-          if echo "$RAW_REF" | grep -qE '[0-9]{4}'; then
-            REF_HAS_YEAR=1
-          fi
-
-          if [ -z "$REF_DAY" ]; then
-            echo "ERROR: Could not parse reference day from maps/test_speakers.bsp"
-            exit 1
-          fi
-
-          echo "REF_DAY: $REF_DAY"
-          echo "REF_HAS_YEAR: $REF_HAS_YEAR"
-          echo "REF_HAS_TIME: $REF_HAS_TIME"
-          echo "::endgroup::"
-
-          echo "::group::Exclude default reinstall batch"
-          
-          # SAFETY RULE: Only exclude based on date if the reference file 
-          # is strictly "YYYY" format (meaning it has NO time).
-          # This prevents excluding custom files uploaded later on the reinstall day.
-          
-          fetch_default_day_excludes() {
-            local dir="$1"
-            local out="_excludes/${dir}.txt"
-
-            lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l ${dir}; quit" "$FTP_HOST" \
-              | awk -v day="$REF_DAY" '
-                  $0 ~ day && $0 ~ /[0-9]{4}/ && $0 !~ /[0-9]{1,2}:[0-9]{2}/ { print $NF }
-                ' \
-              | sort -u >> "$out"
-          }
-
-          if [ "$REF_HAS_YEAR" = "1" ] && [ "$REF_HAS_TIME" = "0" ]; then
-            fetch_default_day_excludes maps
-            fetch_default_day_excludes materials
-            fetch_default_day_excludes models
-            fetch_default_day_excludes sound
-            fetch_default_day_excludes resource
-            echo "Default-day exclusion enabled (reference is strict Mon DD YYYY)."
-          else
-            echo "Default-day exclusion disabled (reference has time or mixed format)."
-            echo "Fallback will rely on repo-bz2 excludes only."
-          fi
-
-          for d in maps materials models sound resource; do
-            sort -u -o "_excludes/${d}.txt" "_excludes/${d}.txt"
-            echo "$d default-day excludes: $(wc -l < "_excludes/${d}.txt")"
-          done
-          echo "::endgroup::"
-
-          echo "::group::Exclude files already in repo"
           if [ -d cstrike ]; then
             find cstrike -type f -name "*.bz2" -print0 | while IFS= read -r -d '' f; do
               rel="${f#cstrike/}"
-              dir="${rel%%/*}"
-              rest="${rel#*/}"
-              unbz2="${rest%.bz2}"
 
-              case "$dir" in
-                maps|materials|models|sound|resource)
-                  echo "$unbz2" >> "_excludes/${dir}.txt"
+              case "$rel" in
+                maps/*)
+                  echo "${rel#maps/%.bz2}" | sed 's/\.bz2$//' >> "_excludes/maps.txt"
+                  ;;
+                materials/*)
+                  echo "${rel#materials/%.bz2}" | sed 's/\.bz2$//' >> "_excludes/materials.txt"
+                  ;;
+                models/*)
+                  echo "${rel#models/%.bz2}" | sed 's/\.bz2$//' >> "_excludes/models.txt"
+                  ;;
+                sound/*)
+                  echo "${rel#sound/%.bz2}" | sed 's/\.bz2$//' >> "_excludes/sound.txt"
+                  ;;
+                resource/overviews/*)
+                  echo "${rel#resource/overviews/%.bz2}" | sed 's/\.bz2$//' >> "_excludes/resource_overviews.txt"
                   ;;
               esac
             done
           fi
 
-          for d in maps materials models sound resource; do
+          for d in maps materials models sound resource_overviews; do
             sort -u -o "_excludes/${d}.txt" "_excludes/${d}.txt"
-            echo "$d total excludes: $(wc -l < "_excludes/${d}.txt")"
+            echo "$d excludes from repo: $(wc -l < "_excludes/${d}.txt")"
           done
-          echo "::endgroup::"
 
-      - name: Mirror from FTP into temp folder
+      - name: Mirror allowlisted custom content only
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USERNAME }}
@@ -131,94 +70,118 @@ jobs:
           REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
         run: |
           set -euo pipefail
-          echo "::group::FTP Smart Mirror"
 
-          rm -rf _ftp
-          mkdir -p _ftp/{maps,materials,models,sound,resource}
+          rm -rf _ftp _out
+          mkdir -p _ftp/maps _ftp/materials _ftp/models _ftp/sound _ftp/resource/overviews
 
-          build_exclude_cmd_fragment() {
-            local file="$1"
+          build_excludes() {
+            local list="$1"
             local frag=""
-            if [ -s "$file" ]; then
+            if [ -s "$list" ]; then
               while IFS= read -r line; do
                 [ -z "$line" ] && continue
-                # FIX: Added escaped quotes \"$line\" to handle filenames with spaces safely
                 frag="$frag --exclude-glob \"$line\""
-              done < "$file"
+              done < "$list"
             fi
             echo "$frag"
           }
 
-          MAPS_EXC=$(build_exclude_cmd_fragment "_excludes/maps.txt")
-          MATS_EXC=$(build_exclude_cmd_fragment "_excludes/materials.txt")
-          MODS_EXC=$(build_exclude_cmd_fragment "_excludes/models.txt")
-          SND_EXC=$(build_exclude_cmd_fragment "_excludes/sound.txt")
-          RES_EXC=$(build_exclude_cmd_fragment "_excludes/resource.txt")
+          MAPS_EXC=$(build_excludes "_excludes/maps.txt")
+          MATS_EXC=$(build_excludes "_excludes/materials.txt")
+          MODS_EXC=$(build_excludes "_excludes/models.txt")
+          SND_EXC=$(build_excludes "_excludes/sound.txt")
+          OV_EXC=$(build_excludes "_excludes/resource_overviews.txt")
 
-          # We construct the command string manually to handle the quotes correctly
+          # Static "never download" excludes (these are Valve refs / traps)
+          MAPS_EXC="$MAPS_EXC --exclude-glob \"test_speakers.bsp\" --exclude-glob \"test_hardware.bsp\""
+
+          # Safer + lighter on FTP: lower parallelism, fail hard on errors.
           lftp -c "
-            open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
+            set cmd:fail-exit yes;
             set ssl:verify-certificate no;
             set ftp:passive-mode true;
-            set cmd:fail-exit yes;
+            open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
             cd '$REMOTE_PATH';
-            mirror --continue --parallel=10 --verbose=1 $MAPS_EXC maps _ftp/maps;
-            mirror --continue --parallel=10 --verbose=1 $MATS_EXC materials _ftp/materials;
-            mirror --continue --parallel=10 --verbose=1 $MODS_EXC models _ftp/models;
-            mirror --continue --parallel=10 --verbose=1 $SND_EXC sound _ftp/sound;
-            mirror --continue --parallel=10 --verbose=1 $RES_EXC resource _ftp/resource;
-            quit"
 
-          echo "::endgroup::"
+            # maps: only what FastDL needs
+            mirror --continue --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.bsp\" --include-glob \"*.nav\" --include-glob \"*.res\" \
+              $MAPS_EXC maps _ftp/maps;
 
-      - name: Compress to bz2-only and stage
+            # materials: vmt/vtf only (includes materials/overviews automatically)
+            mirror --continue --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.vmt\" --include-glob \"*.vtf\" \
+              $MATS_EXC materials _ftp/materials;
+
+            # models: core model blobs only
+            mirror --continue --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.mdl\" --include-glob \"*.vvd\" --include-glob \"*.vtx\" --include-glob \"*.phy\" \
+              $MODS_EXC models _ftp/models;
+
+            # sound
+            mirror --continue --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.wav\" --include-glob \"*.mp3\" \
+              $SND_EXC sound _ftp/sound;
+
+            # resource/overviews ONLY (prevents gameui_*.txt junk)
+            mirror --continue --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.txt\" \
+              $OV_EXC resource/overviews _ftp/resource/overviews;
+
+            quit
+          "
+
+      - name: Compress downloaded files to bz2-only and merge into repo
         run: |
           set -euo pipefail
-          echo "::group::Compress + bz2-only staging"
 
-          rm -rf _out
           mkdir -p _out
-          cp -a _ftp/. _out/
+          rsync -a _ftp/ _out/
 
-          # Compress targets
+          # Compress allowlisted types only (including overviews/*.txt)
           find _out -type f \( \
-            -name "*.bsp" -o -name "*.nav" -o -name "*.mdl" -o \
-            -name "*.vvd" -o -name "*.vtx" -o -name "*.phy" -o \
-            -name "*.vmt" -o -name "*.vtf" -o -name "*.wav" -o \
-            -name "*.mp3" -o -name "*.pcf" -o -name "*.res" \
+            -name "*.bsp" -o -name "*.nav" -o -name "*.res" -o \
+            -name "*.vmt" -o -name "*.vtf" -o \
+            -name "*.mdl" -o -name "*.vvd" -o -name "*.vtx" -o -name "*.phy" -o \
+            -name "*.wav" -o -name "*.mp3" -o \
+            -path "*/resource/overviews/*.txt" \
           \) -print0 | while IFS= read -r -d '' f; do
             bzip2 -f -k "$f"
             rm -f "$f"
           done
 
-          # Delete leftovers
-          find _out -type f \( \
-            -name "*.bsp" -o -name "*.nav" -o -name "*.mdl" -o \
-            -name "*.vvd" -o -name "*.vtx" -o -name "*.phy" -o \
-            -name "*.vmt" -o -name "*.vtf" -o -name "*.wav" -o \
-            -name "*.mp3" -o -name "*.pcf" -o -name "*.res" \
-          \) -delete || true
-
-          rm -rf cstrike
+          # Merge into repo WITHOUT deleting existing good stuff
           mkdir -p cstrike
-          cp -a _out/. cstrike/
+          rsync -a _out/ cstrike/
 
-          # Verification Check
+          # Production safety: ensure no raw (non-bz2) FastDL assets remain in repo
           if find cstrike -type f \( \
-            -name "*.bsp" -o -name "*.nav" -o -name "*.mdl" -o \
-            -name "*.vvd" -o -name "*.vtx" -o -name "*.phy" -o \
-            -name "*.vmt" -o -name "*.vtf" -o -name "*.wav" -o \
-            -name "*.mp3" -o -name "*.pcf" -o -name "*.res" \
+            -name "*.bsp" -o -name "*.nav" -o -name "*.res" -o \
+            -name "*.vmt" -o -name "*.vtf" -o \
+            -name "*.mdl" -o -name "*.vvd" -o -name "*.vtx" -o -name "*.phy" -o \
+            -name "*.wav" -o -name "*.mp3" -o \
+            -path "*/resource/overviews/*.txt" \
           \) | head -n 1 | grep -q .; then
             echo "ERROR: raw (non-bz2) FastDL assets still exist in cstrike/"
             exit 1
           fi
 
-          echo "::endgroup::"
+      - name: Drop known-unneeded junk already in repo (optional cleanup)
+        run: |
+          set -euo pipefail
+
+          # If older runs committed Valve junk, remove it now.
+          # This targets the exact problem you saw: resource/gameui_*.txt (and similar).
+          find cstrike/resource -maxdepth 1 -type f -name "gameui_*.txt.bz2" -delete 2>/dev/null || true
 
       - name: Push Updates
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "FastDL: Synced custom content"
+          commit_message: "FastDL: Sync custom content (allowlist, bz2-only)"
           branch: main
-          file_pattern: 'cstrike/**'
+          file_pattern: "cstrike/**"
