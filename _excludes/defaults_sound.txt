@@ -1,1 +1,0 @@
-sound/admin_plugin/
