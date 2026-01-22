@@ -37,6 +37,8 @@ jobs:
 
           : > _excludes/stock_maps_bsp.txt
           cat >> _excludes/stock_maps_bsp.txt <<'EOF'
+          test_speakers.bsp
+          test_hardware.bsp
           de_train.bsp
           de_tides.bsp
           de_prodigy.bsp
@@ -82,29 +84,32 @@ jobs:
 
           mkdir -p _state/ftp
 
-          lftp -u "$FTP_USER,$FTP_PASS" -e "
+          lftp -e "
             set cmd:fail-exit yes;
             set ssl:verify-certificate no;
             set ftp:passive-mode true;
             set net:max-retries 2;
             set net:timeout 10;
+
+            open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
             cd '$REMOTE_PATH';
 
-            # maps (flat)
             cls -1 maps/*;
 
-            # materials/models/sound can have subdirs - use client glob
-            cls -1 materials/* materials/**;
-            cls -1 models/* models/**;
-            cls -1 sound/* sound/**;
+            cls -1 materials/*;
+            cls -1 materials/**;
 
-            # resource/overviews only
+            cls -1 models/*;
+            cls -1 models/**;
+
+            cls -1 sound/*;
+            cls -1 sound/**;
+
             cls -1 resource/overviews/*;
 
             quit
-          " "$FTP_HOST" > _state/ftp/raw_listing.txt
+          " > _state/ftp/raw_listing.txt
 
-          # Normalize into per-dir relative lists (no leading dir name)
           grep -E '^maps/.*\.(bsp|nav|res)$' _state/ftp/raw_listing.txt \
             | sed 's#^maps/##' \
             | grep -v -F -f _excludes/stock_maps_all.txt \
