@@ -2,11 +2,6 @@ name: Smart FastDL Sync
 
 on:
   workflow_dispatch:
-    inputs:
-      sanitize_stock:
-        description: "Set to 1 for one-time removal of listed stock maps already in repo"
-        required: false
-        default: "0"
   schedule:
     - cron: "0 4 * * *"
 
@@ -22,7 +17,6 @@ jobs:
       FTP_USER: ${{ secrets.FTP_USERNAME }}
       FTP_PASS: ${{ secrets.FTP_PASSWORD }}
       REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
-      SANITIZE_STOCK: ${{ github.event.inputs.sanitize_stock || '0' }}
 
     steps:
       - name: Checkout Repository
@@ -36,26 +30,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y lftp bzip2 rsync
 
-      - name: Build exclude lists from GitHub + stock map skiplist
+      - name: Build stock map skiplist (and derived nav/res)
         run: |
           set -euo pipefail
-          : "${FTP_HOST:?}"
-          : "${FTP_USER:?}"
-          : "${FTP_PASS:?}"
-          : "${REMOTE_PATH:?}"
+          mkdir -p _excludes _state
 
-          mkdir -p _excludes
-
-          : > _excludes/exclude_maps.txt
-          : > _excludes/exclude_materials.txt
-          : > _excludes/exclude_models.txt
-          : > _excludes/exclude_sound.txt
-          : > _excludes/exclude_resource_overviews.txt
-
-          echo "::group::Stock map skiplist"
-          cat >> _excludes/exclude_maps.txt <<'EOF'
-          test_speakers.bsp
-          test_hardware.bsp
+          : > _excludes/stock_maps_bsp.txt
+          cat >> _excludes/stock_maps_bsp.txt <<'EOF'
           de_train.bsp
           de_tides.bsp
           de_prodigy.bsp
@@ -75,40 +56,187 @@ jobs:
           cs_compound.bsp
           cs_assault.bsp
           EOF
-          echo "::endgroup::"
 
-          echo "::group::Exclude everything already present in repo as .bz2"
+          : > _excludes/stock_maps_all.txt
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "$f" >> _excludes/stock_maps_all.txt
+            base="${f%.bsp}"
+            echo "${base}.nav" >> _excludes/stock_maps_all.txt
+            echo "${base}.res" >> _excludes/stock_maps_all.txt
+          done < _excludes/stock_maps_bsp.txt
+          sort -u -o _excludes/stock_maps_all.txt _excludes/stock_maps_all.txt
+
+      - name: Fetch FTP inventory (what should exist)
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USERNAME }}
+          FTP_PASS: ${{ secrets.FTP_PASSWORD }}
+          REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
+        run: |
+          set -euo pipefail
+          : "${FTP_HOST:?}"
+          : "${FTP_USER:?}"
+          : "${FTP_PASS:?}"
+          : "${REMOTE_PATH:?}"
+
+          mkdir -p _state/ftp
+
+          lftp -u "$FTP_USER,$FTP_PASS" -e "
+            set cmd:fail-exit yes;
+            set ssl:verify-certificate no;
+            set ftp:passive-mode true;
+            set net:max-retries 2;
+            set net:timeout 10;
+            cd '$REMOTE_PATH';
+
+            # maps (flat)
+            cls -1 maps/*;
+
+            # materials/models/sound can have subdirs - use client glob
+            cls -1 materials/* materials/**;
+            cls -1 models/* models/**;
+            cls -1 sound/* sound/**;
+
+            # resource/overviews only
+            cls -1 resource/overviews/*;
+
+            quit
+          " "$FTP_HOST" > _state/ftp/raw_listing.txt
+
+          # Normalize into per-dir relative lists (no leading dir name)
+          grep -E '^maps/.*\.(bsp|nav|res)$' _state/ftp/raw_listing.txt \
+            | sed 's#^maps/##' \
+            | grep -v -F -f _excludes/stock_maps_all.txt \
+            | sort -u > _state/ftp/maps.txt
+
+          grep -E '^materials/.*\.(vmt|vtf)$' _state/ftp/raw_listing.txt \
+            | sed 's#^materials/##' \
+            | sort -u > _state/ftp/materials.txt
+
+          grep -E '^models/.*\.(mdl|vvd|vtx|phy)$' _state/ftp/raw_listing.txt \
+            | sed 's#^models/##' \
+            | sort -u > _state/ftp/models.txt
+
+          grep -E '^sound/.*\.(wav|mp3)$' _state/ftp/raw_listing.txt \
+            | sed 's#^sound/##' \
+            | sort -u > _state/ftp/sound.txt
+
+          grep -E '^resource/overviews/.*\.txt$' _state/ftp/raw_listing.txt \
+            | sed 's#^resource/overviews/##' \
+            | sort -u > _state/ftp/resource_overviews.txt
+
+          echo "FTP inventory counts:"
+          echo "maps: $(wc -l < _state/ftp/maps.txt)"
+          echo "materials: $(wc -l < _state/ftp/materials.txt)"
+          echo "models: $(wc -l < _state/ftp/models.txt)"
+          echo "sound: $(wc -l < _state/ftp/sound.txt)"
+          echo "resource_overviews: $(wc -l < _state/ftp/resource_overviews.txt)"
+
+      - name: Build repo inventory (what we have)
+        run: |
+          set -euo pipefail
+          mkdir -p _state/repo
+
+          : > _state/repo/maps.txt
+          : > _state/repo/materials.txt
+          : > _state/repo/models.txt
+          : > _state/repo/sound.txt
+          : > _state/repo/resource_overviews.txt
+
           if [ -d cstrike ]; then
             find cstrike -type f -name "*.bz2" -print0 | while IFS= read -r -d '' f; do
               rel="${f#cstrike/}"
-
               case "$rel" in
                 maps/*)
-                  echo "${rel#maps/}" | sed 's/\.bz2$//' >> _excludes/exclude_maps.txt
+                  echo "${rel#maps/}" | sed 's/\.bz2$//' >> _state/repo/maps.txt
                   ;;
                 materials/*)
-                  echo "${rel#materials/}" | sed 's/\.bz2$//' >> _excludes/exclude_materials.txt
+                  echo "${rel#materials/}" | sed 's/\.bz2$//' >> _state/repo/materials.txt
                   ;;
                 models/*)
-                  echo "${rel#models/}" | sed 's/\.bz2$//' >> _excludes/exclude_models.txt
+                  echo "${rel#models/}" | sed 's/\.bz2$//' >> _state/repo/models.txt
                   ;;
                 sound/*)
-                  echo "${rel#sound/}" | sed 's/\.bz2$//' >> _excludes/exclude_sound.txt
+                  echo "${rel#sound/}" | sed 's/\.bz2$//' >> _state/repo/sound.txt
                   ;;
                 resource/overviews/*)
-                  echo "${rel#resource/overviews/}" | sed 's/\.bz2$//' >> _excludes/exclude_resource_overviews.txt
+                  echo "${rel#resource/overviews/}" | sed 's/\.bz2$//' >> _state/repo/resource_overviews.txt
                   ;;
               esac
             done
           fi
 
-          for f in _excludes/exclude_*.txt; do
-            sort -u -o "$f" "$f"
-            echo "$(basename "$f"): $(wc -l < "$f")"
+          for d in maps materials models sound resource_overviews; do
+            sort -u -o "_state/repo/${d}.txt" "_state/repo/${d}.txt"
+            echo "repo $d: $(wc -l < "_state/repo/${d}.txt")"
           done
-          echo "::endgroup::"
 
-      - name: Mirror missing content from FTP (maps/materials/models/sound + resource/overviews)
+      - name: Sanitize repo vs FTP (delete removed + delete stock that slipped in)
+        run: |
+          set -euo pipefail
+
+          rm -f _state/to_delete_paths.txt
+          touch _state/to_delete_paths.txt
+
+          delete_diff() {
+            local d="$1"
+            local repo_list="_state/repo/${d}.txt"
+            local ftp_list="_state/ftp/${d}.txt"
+            local prefix="cstrike/${d}"
+
+            # repo - ftp = stale to delete
+            comm -23 "$repo_list" "$ftp_list" | while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "${prefix}/${f}.bz2" >> _state/to_delete_paths.txt
+            done
+          }
+
+          delete_diff maps
+          delete_diff materials
+          delete_diff models
+          delete_diff sound
+          delete_diff resource_overviews
+
+          # Extra safety: remove any stock maps (and nav/res) if they exist as bz2
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "cstrike/maps/${f}.bz2" >> _state/to_delete_paths.txt
+          done < _excludes/stock_maps_all.txt
+
+          sort -u -o _state/to_delete_paths.txt _state/to_delete_paths.txt
+
+          del_count=$(wc -l < _state/to_delete_paths.txt)
+          echo "Repo files to delete: $del_count"
+
+          if [ "$del_count" -gt 0 ]; then
+            while IFS= read -r p; do
+              rm -f "$p"
+            done < _state/to_delete_paths.txt
+          fi
+
+      - name: Build FTP download exclude lists (skip what repo already has + stock maps)
+        run: |
+          set -euo pipefail
+          mkdir -p _excludes
+
+          cp _state/repo/maps.txt _excludes/exclude_maps.txt
+          cat _excludes/stock_maps_all.txt >> _excludes/exclude_maps.txt
+          sort -u -o _excludes/exclude_maps.txt _excludes/exclude_maps.txt
+
+          cp _state/repo/materials.txt _excludes/exclude_materials.txt
+          cp _state/repo/models.txt _excludes/exclude_models.txt
+          cp _state/repo/sound.txt _excludes/exclude_sound.txt
+          cp _state/repo/resource_overviews.txt _excludes/exclude_resource_overviews.txt
+
+          echo "Exclude counts:"
+          echo "maps: $(wc -l < _excludes/exclude_maps.txt)"
+          echo "materials: $(wc -l < _excludes/exclude_materials.txt)"
+          echo "models: $(wc -l < _excludes/exclude_models.txt)"
+          echo "sound: $(wc -l < _excludes/exclude_sound.txt)"
+          echo "resource_overviews: $(wc -l < _excludes/exclude_resource_overviews.txt)"
+
+      - name: Mirror missing content from FTP
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USERNAME }}
@@ -128,33 +256,33 @@ jobs:
             cd '$REMOTE_PATH';
 
             mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
               --include-glob \"*.bsp\" --include-glob \"*.nav\" --include-glob \"*.res\" \
               --exclude-glob-from=_excludes/exclude_maps.txt \
+              --exclude-glob \"*\" \
               maps _ftp/maps;
 
             mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
               --include-glob \"*.vmt\" --include-glob \"*.vtf\" \
               --exclude-glob-from=_excludes/exclude_materials.txt \
+              --exclude-glob \"*\" \
               materials _ftp/materials;
 
             mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
               --include-glob \"*.mdl\" --include-glob \"*.vvd\" --include-glob \"*.vtx\" --include-glob \"*.phy\" \
               --exclude-glob-from=_excludes/exclude_models.txt \
+              --exclude-glob \"*\" \
               models _ftp/models;
 
             mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
               --include-glob \"*.wav\" --include-glob \"*.mp3\" \
               --exclude-glob-from=_excludes/exclude_sound.txt \
+              --exclude-glob \"*\" \
               sound _ftp/sound;
 
             mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
               --include-glob \"*.txt\" \
               --exclude-glob-from=_excludes/exclude_resource_overviews.txt \
+              --exclude-glob \"*\" \
               resource/overviews _ftp/resource/overviews;
 
             quit
@@ -190,31 +318,9 @@ jobs:
             -path "*/resource/overviews/*.txt" \
           \) -delete || true
 
-      - name: One-time sanitize stock maps already in repo
-        if: env.SANITIZE_STOCK == '1'
-        run: |
-          set -euo pipefail
-          if [ ! -d cstrike/maps ]; then
-            exit 0
-          fi
-
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              *.bsp) ;;
-              *) continue ;;
-            esac
-
-            base="${f%.bsp}"
-
-            rm -f "cstrike/maps/${f}.bz2"
-            rm -f "cstrike/maps/${base}.nav.bz2"
-            rm -f "cstrike/maps/${base}.res.bz2"
-          done < _excludes/exclude_maps.txt
-
       - name: Push Updates
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "FastDL: Sync custom content (repo-excludes, stock-skiplist, overviews-only)"
+          commit_message: "FastDL: Sync (FTP inventory reconcile + stock skiplist + overviews-only)"
           branch: main
-          file_pattern: "cstrike/** _excludes/**"
+          file_pattern: "cstrike/** _excludes/** _state/**"
