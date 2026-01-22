@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       sanitize_stock:
-        description: "Set to 1 for one-time removal of stock maps already in repo"
+        description: "Set to 1 for one-time removal of listed stock maps already in repo"
         required: false
         default: "0"
   schedule:
@@ -28,23 +28,15 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          lfs: false
           fetch-depth: 0
+          lfs: false
 
       - name: Install Dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y lftp bzip2 rsync
 
-      - name: Restore raw cache
-        uses: actions/cache@v4
-        with:
-          path: _raw_cache
-          key: fastdl-raw-${{ github.repository }}-${{ runner.os }}
-          restore-keys: |
-            fastdl-raw-${{ github.repository }}-${{ runner.os }}
-
-      - name: Build exclude lists (defaults + repo bz2 + stock map list)
+      - name: Build exclude lists from GitHub + stock map skiplist
         run: |
           set -euo pipefail
           : "${FTP_HOST:?}"
@@ -53,38 +45,17 @@ jobs:
           : "${REMOTE_PATH:?}"
 
           mkdir -p _excludes
-          for d in maps materials models sound resource_overviews; do
-            : > "_excludes/final_${d}.txt"
-          done
 
-          echo "::group::Detect reinstall batch signature from maps/test_speakers.bsp"
-          RAW_REF=$(
-            lftp -u "$FTP_USER,$FTP_PASS" \
-              -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps/test_speakers.bsp; quit" \
-              "$FTP_HOST" || true
-          )
-          REF_SIG=$(echo "$RAW_REF" | grep -oE '[A-Za-z]{3}[[:space:]]+[0-9]{1,2}[[:space:]]+[0-9]{4}' | head -n 1 || true)
-          if [ -n "$REF_SIG" ]; then
-            echo "Reinstall batch signature: $REF_SIG"
-          else
-            echo "No date-only signature detected (skipping batch exclude)."
-          fi
-          echo "::endgroup::"
+          : > _excludes/exclude_maps.txt
+          : > _excludes/exclude_materials.txt
+          : > _excludes/exclude_models.txt
+          : > _excludes/exclude_sound.txt
+          : > _excludes/exclude_resource_overviews.txt
 
-          echo "::group::Defaults exclude (date-only batch, maps only)"
-          if [ -n "$REF_SIG" ]; then
-            lftp -u "$FTP_USER,$FTP_PASS" \
-              -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps; quit" \
-              "$FTP_HOST" \
-              | awk -v ref="$REF_SIG" '$0 ~ ref && $0 !~ /[0-9]{1,2}:[0-9]{2}/ { print $NF }' \
-              | sort -u >> "_excludes/final_maps.txt"
-          fi
-          echo "test_speakers.bsp" >> "_excludes/final_maps.txt"
-          echo "test_hardware.bsp" >> "_excludes/final_maps.txt"
-          echo "::endgroup::"
-
-          echo "::group::Hard exclude known CS:S stock maps (always)"
-          cat >> "_excludes/final_maps.txt" <<'EOF'
+          echo "::group::Stock map skiplist"
+          cat >> _excludes/exclude_maps.txt <<'EOF'
+          test_speakers.bsp
+          test_hardware.bsp
           de_train.bsp
           de_tides.bsp
           de_prodigy.bsp
@@ -106,37 +77,38 @@ jobs:
           EOF
           echo "::endgroup::"
 
-          echo "::group::Exclude anything already present as bz2 in repo"
+          echo "::group::Exclude everything already present in repo as .bz2"
           if [ -d cstrike ]; then
             find cstrike -type f -name "*.bz2" -print0 | while IFS= read -r -d '' f; do
               rel="${f#cstrike/}"
+
               case "$rel" in
                 maps/*)
-                  echo "${rel#maps/}" | sed 's/\.bz2$//' >> "_excludes/final_maps.txt"
+                  echo "${rel#maps/}" | sed 's/\.bz2$//' >> _excludes/exclude_maps.txt
                   ;;
                 materials/*)
-                  echo "${rel#materials/}" | sed 's/\.bz2$//' >> "_excludes/final_materials.txt"
+                  echo "${rel#materials/}" | sed 's/\.bz2$//' >> _excludes/exclude_materials.txt
                   ;;
                 models/*)
-                  echo "${rel#models/}" | sed 's/\.bz2$//' >> "_excludes/final_models.txt"
+                  echo "${rel#models/}" | sed 's/\.bz2$//' >> _excludes/exclude_models.txt
                   ;;
                 sound/*)
-                  echo "${rel#sound/}" | sed 's/\.bz2$//' >> "_excludes/final_sound.txt"
+                  echo "${rel#sound/}" | sed 's/\.bz2$//' >> _excludes/exclude_sound.txt
                   ;;
                 resource/overviews/*)
-                  echo "${rel#resource/overviews/}" | sed 's/\.bz2$//' >> "_excludes/final_resource_overviews.txt"
+                  echo "${rel#resource/overviews/}" | sed 's/\.bz2$//' >> _excludes/exclude_resource_overviews.txt
                   ;;
               esac
             done
           fi
+
+          for f in _excludes/exclude_*.txt; do
+            sort -u -o "$f" "$f"
+            echo "$(basename "$f"): $(wc -l < "$f")"
+          done
           echo "::endgroup::"
 
-          for d in maps materials models sound resource_overviews; do
-            sort -u -o "_excludes/final_${d}.txt" "_excludes/final_${d}.txt"
-            echo "final_${d}: $(wc -l < "_excludes/final_${d}.txt")"
-          done
-
-      - name: Mirror into raw cache (incremental, low FTP load)
+      - name: Mirror missing content from FTP (maps/materials/models/sound + resource/overviews)
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USERNAME }}
@@ -145,7 +117,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p _raw_cache/{maps,materials,models,sound,resource/overviews}
+          rm -rf _ftp _out
+          mkdir -p _ftp/maps _ftp/materials _ftp/models _ftp/sound _ftp/resource/overviews
 
           lftp -c "
             set cmd:fail-exit yes;
@@ -154,46 +127,45 @@ jobs:
             open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
             cd '$REMOTE_PATH';
 
-            mirror --only-newer --continue --parallel=2 --verbose=0 \
+            mirror --continue --only-newer --parallel=3 --verbose=1 \
               --exclude-glob \"*\" \
               --include-glob \"*.bsp\" --include-glob \"*.nav\" --include-glob \"*.res\" \
-              --exclude-glob-from=_excludes/final_maps.txt \
-              maps _raw_cache/maps;
+              --exclude-glob-from=_excludes/exclude_maps.txt \
+              maps _ftp/maps;
 
-            mirror --only-newer --continue --parallel=2 --verbose=0 \
+            mirror --continue --only-newer --parallel=3 --verbose=1 \
               --exclude-glob \"*\" \
               --include-glob \"*.vmt\" --include-glob \"*.vtf\" \
-              --exclude-glob-from=_excludes/final_materials.txt \
-              materials _raw_cache/materials;
+              --exclude-glob-from=_excludes/exclude_materials.txt \
+              materials _ftp/materials;
 
-            mirror --only-newer --continue --parallel=2 --verbose=0 \
+            mirror --continue --only-newer --parallel=3 --verbose=1 \
               --exclude-glob \"*\" \
               --include-glob \"*.mdl\" --include-glob \"*.vvd\" --include-glob \"*.vtx\" --include-glob \"*.phy\" \
-              --exclude-glob-from=_excludes/final_models.txt \
-              models _raw_cache/models;
+              --exclude-glob-from=_excludes/exclude_models.txt \
+              models _ftp/models;
 
-            mirror --only-newer --continue --parallel=2 --verbose=0 \
+            mirror --continue --only-newer --parallel=3 --verbose=1 \
               --exclude-glob \"*\" \
               --include-glob \"*.wav\" --include-glob \"*.mp3\" \
-              --exclude-glob-from=_excludes/final_sound.txt \
-              sound _raw_cache/sound;
+              --exclude-glob-from=_excludes/exclude_sound.txt \
+              sound _ftp/sound;
 
-            mirror --only-newer --continue --parallel=2 --verbose=0 \
+            mirror --continue --only-newer --parallel=3 --verbose=1 \
               --exclude-glob \"*\" \
               --include-glob \"*.txt\" \
-              --exclude-glob-from=_excludes/final_resource_overviews.txt \
-              resource/overviews _raw_cache/resource/overviews;
+              --exclude-glob-from=_excludes/exclude_resource_overviews.txt \
+              resource/overviews _ftp/resource/overviews;
 
             quit
           "
 
-      - name: Compress changed raw files and merge into repo (bz2-only)
+      - name: Compress to bz2-only and merge into repo
         run: |
           set -euo pipefail
 
-          rm -rf _out
           mkdir -p _out
-          rsync -a _raw_cache/ _out/
+          rsync -a _ftp/ _out/
 
           find _out -type f \( \
             -name "*.bsp" -o -name "*.nav" -o -name "*.res" -o \
@@ -209,6 +181,7 @@ jobs:
           mkdir -p cstrike
           rsync -a _out/ cstrike/
 
+          # enforce bz2-only
           find cstrike -type f \( \
             -name "*.bsp" -o -name "*.nav" -o -name "*.res" -o \
             -name "*.vmt" -o -name "*.vtf" -o \
@@ -221,15 +194,12 @@ jobs:
         if: env.SANITIZE_STOCK == '1'
         run: |
           set -euo pipefail
-
           if [ ! -d cstrike/maps ]; then
             exit 0
           fi
 
           while IFS= read -r f; do
             [ -z "$f" ] && continue
-
-            # Only act on *.bsp entries from the list
             case "$f" in
               *.bsp) ;;
               *) continue ;;
@@ -240,11 +210,11 @@ jobs:
             rm -f "cstrike/maps/${f}.bz2"
             rm -f "cstrike/maps/${base}.nav.bz2"
             rm -f "cstrike/maps/${base}.res.bz2"
-          done < _excludes/final_maps.txt
+          done < _excludes/exclude_maps.txt
 
       - name: Push Updates
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "FastDL: Sync custom content (cached raw mirror)"
+          commit_message: "FastDL: Sync custom content (repo-excludes, stock-skiplist, overviews-only)"
           branch: main
           file_pattern: "cstrike/** _excludes/**"
