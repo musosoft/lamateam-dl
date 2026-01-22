@@ -36,14 +36,8 @@ jobs:
 
           mkdir -p _excludes
 
-          : > _excludes/exclude_maps.txt
-          : > _excludes/exclude_materials.txt
-          : > _excludes/exclude_models.txt
-          : > _excludes/exclude_sound.txt
-          : > _excludes/exclude_resource_overviews.txt
-
-          # Stock maps: BSP only (your list)
-          cat >> _excludes/exclude_maps.txt <<'EOF'
+          : > _excludes/stock_maps_bsp.txt
+          cat >> _excludes/stock_maps_bsp.txt <<'EOF'
           test_speakers.bsp
           test_hardware.bsp
           de_train.bsp
@@ -65,8 +59,18 @@ jobs:
           cs_compound.bsp
           cs_assault.bsp
           EOF
+          sort -u -o _excludes/stock_maps_bsp.txt _excludes/stock_maps_bsp.txt
 
-          # Exclude already-present repo files (bz2 minus suffix)
+          : > _excludes/exclude_maps.txt
+          : > _excludes/exclude_materials.txt
+          : > _excludes/exclude_models.txt
+          : > _excludes/exclude_sound.txt
+          : > _excludes/exclude_resource_overviews.txt
+
+          # maps excludes start with stock map list (bsp only)
+          cat _excludes/stock_maps_bsp.txt >> _excludes/exclude_maps.txt
+
+          # repo-derived excludes (bz2 minus suffix)
           if [ -d cstrike ]; then
             find cstrike -type f -name "*.bz2" -print0 | while IFS= read -r -d '' f; do
               rel="${f#cstrike/}"
@@ -95,7 +99,7 @@ jobs:
             echo "$(basename "$f"): $(wc -l < "$f")"
           done
 
-      - name: Mirror missing content from FTP (no listing globs, no 550)
+      - name: Mirror missing content from FTP (recursive-safe)
         run: |
           set -euo pipefail
           : "${FTP_HOST:?}"
@@ -114,31 +118,41 @@ jobs:
             open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
             cd '$REMOTE_PATH';
 
+            # maps (usually flat, but allow dirs anyway)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --include-glob \"*/\" \
               --include-glob \"*.bsp\" --include-glob \"*.nav\" \
               --exclude-glob-from=_excludes/exclude_maps.txt \
               --exclude-glob \"*\" \
               maps _ftp/maps;
 
+            # materials (needs recursion)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --include-glob \"*/\" \
               --include-glob \"*.vmt\" --include-glob \"*.vtf\" \
               --exclude-glob-from=_excludes/exclude_materials.txt \
               --exclude-glob \"*\" \
               materials _ftp/materials;
 
+            # models (no .phy)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --include-glob \"*/\" \
               --include-glob \"*.mdl\" --include-glob \"*.vvd\" --include-glob \"*.vtx\" \
               --exclude-glob-from=_excludes/exclude_models.txt \
               --exclude-glob \"*\" \
               models _ftp/models;
 
+            # sound (needs recursion)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --include-glob \"*/\" \
               --include-glob \"*.wav\" --include-glob \"*.mp3\" \
               --exclude-glob-from=_excludes/exclude_sound.txt \
               --exclude-glob \"*\" \
               sound _ftp/sound;
 
+            # resource/overviews only (recursion safe)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --include-glob \"*/\" \
               --include-glob \"*.txt\" \
               --exclude-glob-from=_excludes/exclude_resource_overviews.txt \
               --exclude-glob \"*\" \
@@ -177,14 +191,14 @@ jobs:
             -path "*/resource/overviews/*.txt" \
           \) -delete || true
 
-      - name: Sanitize repo (remove stock maps every run)
+      - name: Sanitize repo (remove stock maps every run, stock list only)
         run: |
           set -euo pipefail
           if [ -d cstrike/maps ]; then
             while IFS= read -r f; do
               [ -z "$f" ] && continue
               rm -f "cstrike/maps/${f}.bz2"
-            done < _excludes/exclude_maps.txt
+            done < _excludes/stock_maps_bsp.txt
           fi
 
       - name: Push Updates
