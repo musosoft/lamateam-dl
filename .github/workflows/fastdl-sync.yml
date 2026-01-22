@@ -2,8 +2,13 @@ name: Smart FastDL Sync
 
 on:
   workflow_dispatch:
+    inputs:
+      sanitize_stock:
+        description: "Set to 1 for one-time removal of stock maps already in repo"
+        required: false
+        default: "0"
   schedule:
-    - cron: '0 4 * * *' # Daily at 4 AM
+    - cron: "0 4 * * *"
 
 permissions:
   contents: write
@@ -11,11 +16,19 @@ permissions:
 jobs:
   smart-sync:
     runs-on: ubuntu-latest
+
+    env:
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USER: ${{ secrets.FTP_USERNAME }}
+      FTP_PASS: ${{ secrets.FTP_PASSWORD }}
+      REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
+      SANITIZE_STOCK: ${{ github.event.inputs.sanitize_stock || '0' }}
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          lfs: true             # LFS Enabled for your custom maps
+          lfs: false
           fetch-depth: 0
 
       - name: Install Dependencies
@@ -23,122 +36,107 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y lftp bzip2 rsync
 
-      - name: Check Reference & Defaults Cache
-        id: check_cache
-        env:
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USERNAME }}
-          FTP_PASS: ${{ secrets.FTP_PASSWORD }}
-          REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
+      - name: Restore raw cache
+        uses: actions/cache@v4
+        with:
+          path: _raw_cache
+          key: fastdl-raw-${{ github.repository }}-${{ runner.os }}
+          restore-keys: |
+            fastdl-raw-${{ github.repository }}-${{ runner.os }}
+
+      - name: Build exclude lists (defaults + repo bz2 + stock map list)
         run: |
           set -euo pipefail
-          
-          # Initialize directory
+          : "${FTP_HOST:?}"
+          : "${FTP_USER:?}"
+          : "${FTP_PASS:?}"
+          : "${REMOTE_PATH:?}"
+
           mkdir -p _excludes
-          
-          echo "::group::Checking Server Reference"
-          RAW_REF=$(lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps/test_speakers.bsp; quit" "$FTP_HOST")
-          
-          # Extract Date Signature (e.g. "May 11 2025")
-          # Strict YYYY format check to ensure it's a default file
-          CURRENT_SIG=$(echo "$RAW_REF" | grep -oE '[A-Za-z]{3}\s+[0-9]{1,2}\s+[0-9]{4}' | head -n 1 || true)
-          echo "Server Signature: '$CURRENT_SIG'"
-          
-          CACHE_FILE="_excludes/reference.sig"
-          REBUILD_DEFAULTS="true"
-          
-          if [ -f "$CACHE_FILE" ] && [ -n "$CURRENT_SIG" ]; then
-            CACHED_SIG=$(cat "$CACHE_FILE")
-            # We also check if defaults_maps.txt actually exists/is non-empty, otherwise force rebuild
-            if [ "$CURRENT_SIG" == "$CACHED_SIG" ] && [ -s "_excludes/defaults_maps.txt" ]; then
-              echo "✅ Cache Hit! Defaults list is valid."
-              REBUILD_DEFAULTS="false"
-            else
-              echo "⚠️  Cache Miss (or file missing). Rebuilding Defaults."
-            fi
+          for d in maps materials models sound resource_overviews; do
+            : > "_excludes/final_${d}.txt"
+          done
+
+          echo "::group::Detect reinstall batch signature from maps/test_speakers.bsp"
+          RAW_REF=$(
+            lftp -u "$FTP_USER,$FTP_PASS" \
+              -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps/test_speakers.bsp; quit" \
+              "$FTP_HOST" || true
+          )
+          REF_SIG=$(echo "$RAW_REF" | grep -oE '[A-Za-z]{3}[[:space:]]+[0-9]{1,2}[[:space:]]+[0-9]{4}' | head -n 1 || true)
+          if [ -n "$REF_SIG" ]; then
+            echo "Reinstall batch signature: $REF_SIG"
+          else
+            echo "No date-only signature detected (skipping batch exclude)."
           fi
-          
-          echo "rebuild=$REBUILD_DEFAULTS" >> $GITHUB_OUTPUT
-          echo "current_sig=$CURRENT_SIG" >> $GITHUB_OUTPUT
           echo "::endgroup::"
 
-      - name: Build 'Defaults' Exclude List (Cached)
-        if: steps.check_cache.outputs.rebuild == 'true'
-        env:
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USERNAME }}
-          FTP_PASS: ${{ secrets.FTP_PASSWORD }}
-          REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
-          REF_SIG: ${{ steps.check_cache.outputs.current_sig }}
-        run: |
-          set -euo pipefail
-          
-          echo "::group::Scanning FTP for Default Batch"
-          echo "$REF_SIG" > "_excludes/reference.sig"
-          
-          if [ -z "$REF_SIG" ]; then
-            echo "❌ ERROR: No Year-based date found. Cannot determine defaults."
-            # Create empty files to prevent crash
-            for d in maps materials models sound resource; do : > "_excludes/defaults_${d}.txt"; done
-            exit 0
+          echo "::group::Defaults exclude (date-only batch, maps only)"
+          if [ -n "$REF_SIG" ]; then
+            lftp -u "$FTP_USER,$FTP_PASS" \
+              -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l maps; quit" \
+              "$FTP_HOST" \
+              | awk -v ref="$REF_SIG" '$0 ~ ref && $0 !~ /[0-9]{1,2}:[0-9]{2}/ { print $NF }' \
+              | sort -u >> "_excludes/final_maps.txt"
           fi
-          
-          scan_defaults() {
-            local dir=$1
-            # Filter: Match Date, Match Year, NO Time
-            lftp -u "$FTP_USER,$FTP_PASS" -e "set ssl:verify-certificate no; cd '$REMOTE_PATH'; cls -l $dir; quit" "$FTP_HOST" \
-            | awk -v ref="$REF_SIG" '$0 ~ ref && $0 ~ /[0-9]{4}/ && $0 !~ /:[0-9]{2}/ { print $NF }' \
-            | sort -u > "_excludes/defaults_${dir}.txt"
-          }
-          
-          scan_defaults "maps"
-          scan_defaults "materials"
-          scan_defaults "models"
-          scan_defaults "sound"
-          scan_defaults "resource" 
-
-          # Always exclude the reference files
-          echo "test_speakers.bsp" >> "_excludes/defaults_maps.txt"
-          echo "test_hardware.bsp" >> "_excludes/defaults_maps.txt"
+          echo "test_speakers.bsp" >> "_excludes/final_maps.txt"
+          echo "test_hardware.bsp" >> "_excludes/final_maps.txt"
           echo "::endgroup::"
 
-      - name: Build 'Repo' Exclude List (Always Fresh)
-        run: |
-          set -euo pipefail
-          echo "::group::Scanning Local Repo for Existing Files"
-          
-          # Create empty repo lists
-          for d in maps materials models sound resource; do : > "_excludes/repo_${d}.txt"; done
+          echo "::group::Hard exclude known CS:S stock maps (always)"
+          cat >> "_excludes/final_maps.txt" <<'EOF'
+          de_train.bsp
+          de_tides.bsp
+          de_prodigy.bsp
+          de_port.bsp
+          de_piranesi.bsp
+          de_nuke.bsp
+          de_inferno.bsp
+          de_dust2.bsp
+          de_dust.bsp
+          de_chateau.bsp
+          de_cbble.bsp
+          de_aztec.bsp
+          cs_office.bsp
+          cs_militia.bsp
+          cs_italy.bsp
+          cs_havana.bsp
+          cs_compound.bsp
+          cs_assault.bsp
+          EOF
+          echo "::endgroup::"
 
+          echo "::group::Exclude anything already present as bz2 in repo"
           if [ -d cstrike ]; then
-            # Find all .bz2 files, strip paths and extensions, save to repo list
-            # We use sed to ensure we get just the filename "my_map.bsp" from "cstrike/maps/my_map.bsp.bz2"
-            find cstrike -type f -name "*.bz2" | while read -r f; do
-              rel="${f#cstrike/}"         # maps/my_map.bsp.bz2
-              dir="${rel%%/*}"            # maps
-              filename="${rel#*/}"        # my_map.bsp.bz2
-              clean_name="${filename%.bz2}" # my_map.bsp
-              
-              if [ -f "_excludes/repo_${dir}.txt" ]; then
-                echo "$clean_name" >> "_excludes/repo_${dir}.txt"
-              fi
+            find cstrike -type f -name "*.bz2" -print0 | while IFS= read -r -d '' f; do
+              rel="${f#cstrike/}"
+              case "$rel" in
+                maps/*)
+                  echo "${rel#maps/}" | sed 's/\.bz2$//' >> "_excludes/final_maps.txt"
+                  ;;
+                materials/*)
+                  echo "${rel#materials/}" | sed 's/\.bz2$//' >> "_excludes/final_materials.txt"
+                  ;;
+                models/*)
+                  echo "${rel#models/}" | sed 's/\.bz2$//' >> "_excludes/final_models.txt"
+                  ;;
+                sound/*)
+                  echo "${rel#sound/}" | sed 's/\.bz2$//' >> "_excludes/final_sound.txt"
+                  ;;
+                resource/overviews/*)
+                  echo "${rel#resource/overviews/}" | sed 's/\.bz2$//' >> "_excludes/final_resource_overviews.txt"
+                  ;;
+              esac
             done
           fi
           echo "::endgroup::"
 
-      - name: Merge Lists for LFTP
-        run: |
-          set -euo pipefail
-          echo "::group::Merging Lists"
-          
-          # Combine Defaults + Repo into the final file lftp uses
-          for d in maps materials models sound resource; do
-             cat "_excludes/defaults_${d}.txt" "_excludes/repo_${d}.txt" | sort -u > "_excludes/final_${d}.txt"
-             echo "Final Excludes for $d: $(wc -l < "_excludes/final_${d}.txt") files"
+          for d in maps materials models sound resource_overviews; do
+            sort -u -o "_excludes/final_${d}.txt" "_excludes/final_${d}.txt"
+            echo "final_${d}: $(wc -l < "_excludes/final_${d}.txt")"
           done
-          echo "::endgroup::"
 
-      - name: Mirror Custom Content
+      - name: Mirror into raw cache (incremental, low FTP load)
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USERNAME }}
@@ -146,83 +144,107 @@ jobs:
           REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
         run: |
           set -euo pipefail
-          rm -rf _ftp
-          mkdir -p _ftp/maps _ftp/materials _ftp/models _ftp/sound _ftp/resource
 
-          echo "::group::📥 DOWNLOADING FILES"
+          mkdir -p _raw_cache/{maps,materials,models,sound,resource/overviews}
+
           lftp -c "
             set cmd:fail-exit yes;
             set ssl:verify-certificate no;
             set ftp:passive-mode true;
             open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
             cd '$REMOTE_PATH';
-            
-            # We use final_*.txt which GUARANTEES we don't download files present in repo
-            
-            mirror --continue --parallel=5 --verbose=1 --exclude-glob-from=_excludes/final_maps.txt --include-glob \"*.bsp\" --include-glob \"*.nav\" --include-glob \"*.res\" maps _ftp/maps;
-            mirror --continue --parallel=5 --verbose=1 --exclude-glob-from=_excludes/final_materials.txt --include-glob \"*.vmt\" --include-glob \"*.vtf\" materials _ftp/materials;
-            mirror --continue --parallel=5 --verbose=1 --exclude-glob-from=_excludes/final_models.txt --include-glob \"*.mdl\" --include-glob \"*.vvd\" --include-glob \"*.vtx\" --include-glob \"*.phy\" models _ftp/models;
-            mirror --continue --parallel=5 --verbose=1 --exclude-glob-from=_excludes/final_sound.txt --include-glob \"*.wav\" --include-glob \"*.mp3\" sound _ftp/sound;
-            mirror --continue --parallel=5 --verbose=1 --exclude-glob-from=_excludes/final_resource.txt --include-glob \"*.txt\" resource _ftp/resource;
-            quit"
-          echo "::endgroup::"
 
-      - name: Compress and Merge
+            mirror --only-newer --continue --parallel=2 --verbose=0 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.bsp\" --include-glob \"*.nav\" --include-glob \"*.res\" \
+              --exclude-glob-from=_excludes/final_maps.txt \
+              maps _raw_cache/maps;
+
+            mirror --only-newer --continue --parallel=2 --verbose=0 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.vmt\" --include-glob \"*.vtf\" \
+              --exclude-glob-from=_excludes/final_materials.txt \
+              materials _raw_cache/materials;
+
+            mirror --only-newer --continue --parallel=2 --verbose=0 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.mdl\" --include-glob \"*.vvd\" --include-glob \"*.vtx\" --include-glob \"*.phy\" \
+              --exclude-glob-from=_excludes/final_models.txt \
+              models _raw_cache/models;
+
+            mirror --only-newer --continue --parallel=2 --verbose=0 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.wav\" --include-glob \"*.mp3\" \
+              --exclude-glob-from=_excludes/final_sound.txt \
+              sound _raw_cache/sound;
+
+            mirror --only-newer --continue --parallel=2 --verbose=0 \
+              --exclude-glob \"*\" \
+              --include-glob \"*.txt\" \
+              --exclude-glob-from=_excludes/final_resource_overviews.txt \
+              resource/overviews _raw_cache/resource/overviews;
+
+            quit
+          "
+
+      - name: Compress changed raw files and merge into repo (bz2-only)
         run: |
           set -euo pipefail
-          mkdir -p _out
-          rsync -a _ftp/ _out/
 
-          echo "::group::📦 COMPRESSING FILES"
-          find _out -type f ! -type l \( \
+          rm -rf _out
+          mkdir -p _out
+          rsync -a _raw_cache/ _out/
+
+          find _out -type f \( \
             -name "*.bsp" -o -name "*.nav" -o -name "*.res" -o \
             -name "*.vmt" -o -name "*.vtf" -o \
             -name "*.mdl" -o -name "*.vvd" -o -name "*.vtx" -o -name "*.phy" -o \
             -name "*.wav" -o -name "*.mp3" -o \
-            -name "*.txt" \
+            -path "*/resource/overviews/*.txt" \
           \) -print0 | while IFS= read -r -d '' f; do
-            if [ -s "$f" ]; then
-              bzip2 -z -f "$f" || echo "WARNING: Failed to compress $f"
-            fi
+            bzip2 -f -k "$f"
+            rm -f "$f"
           done
-          echo "::endgroup::"
 
           mkdir -p cstrike
-          rsync -av _out/ cstrike/
+          rsync -a _out/ cstrike/
 
-      - name: 🧹 Sanitize Repo (Enforce Excludes)
+          find cstrike -type f \( \
+            -name "*.bsp" -o -name "*.nav" -o -name "*.res" -o \
+            -name "*.vmt" -o -name "*.vtf" -o \
+            -name "*.mdl" -o -name "*.vvd" -o -name "*.vtx" -o -name "*.phy" -o \
+            -name "*.wav" -o -name "*.mp3" -o \
+            -path "*/resource/overviews/*.txt" \
+          \) -delete || true
+
+      - name: One-time sanitize stock maps already in repo
+        if: env.SANITIZE_STOCK == '1'
         run: |
           set -euo pipefail
-          echo "::group::Cleaning Excluded Files from Repo"
-          
-          # Delete files that are in the exclude list but exist in repo (cleanup previous mistakes)
-          for type in maps materials models sound resource; do
-             list="_excludes/final_${type}.txt"
-             dir="cstrike/${type}"
-             if [ -f "$list" ] && [ -d "$dir" ]; then
-                count=0
-                while IFS= read -r file; do
-                   [ -z "$file" ] && continue
-                   # Delete bz2 and raw
-                   if [ -f "${dir}/${file}.bz2" ]; then
-                      rm -f "${dir}/${file}.bz2"
-                      count=$((count+1))
-                   fi
-                   if [ -f "${dir}/${file}" ]; then
-                      rm -f "${dir}/${file}"
-                      count=$((count+1))
-                   fi
-                done < "$list"
-                if [ "$count" -gt 0 ]; then
-                   echo "Removed $count excluded files from $type"
-                fi
-             fi
-          done
-          echo "::endgroup::"
+
+          if [ ! -d cstrike/maps ]; then
+            exit 0
+          fi
+
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+
+            # Only act on *.bsp entries from the list
+            case "$f" in
+              *.bsp) ;;
+              *) continue ;;
+            esac
+
+            base="${f%.bsp}"
+
+            rm -f "cstrike/maps/${f}.bz2"
+            rm -f "cstrike/maps/${base}.nav.bz2"
+            rm -f "cstrike/maps/${base}.res.bz2"
+          done < _excludes/final_maps.txt
 
       - name: Push Updates
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "FastDL: Sync custom content"
+          commit_message: "FastDL: Sync custom content (cached raw mirror)"
           branch: main
           file_pattern: "cstrike/** _excludes/**"
