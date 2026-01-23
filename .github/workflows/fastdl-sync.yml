@@ -19,7 +19,7 @@ jobs:
       REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
 
     steps:
-      - name: Checkout Repository (sparse)
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -71,10 +71,8 @@ jobs:
           : > _excludes/exclude_sound.txt
           : > _excludes/exclude_resource_overviews.txt
 
-          # maps excludes start with stock map list (bsp only)
           cat _excludes/stock_maps_bsp.txt >> _excludes/exclude_maps.txt
 
-          # repo-derived excludes (bz2 minus suffix)
           if [ -d cstrike ]; then
             find cstrike -type f -name "*.bz2" -print0 | while IFS= read -r -d '' f; do
               rel="${f#cstrike/}"
@@ -103,7 +101,7 @@ jobs:
             echo "$(basename "$f"): $(wc -l < "$f")"
           done
 
-      - name: Mirror missing content from FTP (fixed rule order)
+      - name: Mirror missing content from FTP (recursive-safe)
         run: |
           set -euo pipefail
           : "${FTP_HOST:?}"
@@ -122,7 +120,6 @@ jobs:
             open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
             cd '$REMOTE_PATH';
 
-            # IMPORTANT: exclude-first, include-after, exclude-from-last (so it actually downloads)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
               --exclude-glob \"*\" \
               --include-glob \"*/\" \
@@ -137,7 +134,6 @@ jobs:
               --exclude-glob-from=_excludes/exclude_materials.txt \
               materials _ftp/materials;
 
-            # models: no .phy
             mirror --continue --only-newer --parallel=3 --verbose=1 \
               --exclude-glob \"*\" \
               --include-glob \"*/\" \
@@ -152,7 +148,6 @@ jobs:
               --exclude-glob-from=_excludes/exclude_sound.txt \
               sound _ftp/sound;
 
-            # resource/overviews only
             mirror --continue --only-newer --parallel=3 --verbose=1 \
               --exclude-glob \"*\" \
               --include-glob \"*/\" \
@@ -184,7 +179,6 @@ jobs:
           mkdir -p cstrike
           rsync -a _out/ cstrike/
 
-          # enforce bz2-only
           find cstrike -type f \( \
             -name "*.bsp" -o -name "*.nav" -o \
             -name "*.vmt" -o -name "*.vtf" -o \
@@ -193,19 +187,117 @@ jobs:
             -path "*/resource/overviews/*.txt" \
           \) -delete || true
 
-      - name: Sanitize repo (remove stock maps every run, bsp only)
+      - name: Prune repo files not present on FTP (and always prune stock maps)
         run: |
           set -euo pipefail
-          if [ -d cstrike/maps ]; then
-            while IFS= read -r f; do
-              [ -z "$f" ] && continue
-              rm -f "cstrike/maps/${f}.bz2"
-            done < _excludes/stock_maps_bsp.txt
+          : "${FTP_HOST:?}"
+          : "${FTP_USER:?}"
+          : "${FTP_PASS:?}"
+          : "${REMOTE_PATH:?}"
+
+          mkdir -p _state/ftp _state/repo
+
+          # Repo inventory (bz2 minus suffix, keep subpaths)
+          : > _state/repo/maps.txt
+          : > _state/repo/materials.txt
+          : > _state/repo/models.txt
+          : > _state/repo/sound.txt
+          : > _state/repo/resource_overviews.txt
+
+          if [ -d cstrike ]; then
+            find cstrike -type f -name "*.bz2" -print0 | while IFS= read -r -d '' f; do
+              rel="${f#cstrike/}"
+              case "$rel" in
+                maps/*)
+                  echo "${rel#maps/}" | sed 's/\.bz2$//' >> _state/repo/maps.txt
+                  ;;
+                materials/*)
+                  echo "${rel#materials/}" | sed 's/\.bz2$//' >> _state/repo/materials.txt
+                  ;;
+                models/*)
+                  echo "${rel#models/}" | sed 's/\.bz2$//' >> _state/repo/models.txt
+                  ;;
+                sound/*)
+                  echo "${rel#sound/}" | sed 's/\.bz2$//' >> _state/repo/sound.txt
+                  ;;
+                resource/overviews/*)
+                  echo "${rel#resource/overviews/}" | sed 's/\.bz2$//' >> _state/repo/resource_overviews.txt
+                  ;;
+              esac
+            done
           fi
+
+          for d in maps materials models sound resource_overviews; do
+            sort -u -o "_state/repo/${d}.txt" "_state/repo/${d}.txt"
+          done
+
+          # FTP inventory via lftp find (no wildcards, no 550)
+          lftp -c "
+            set cmd:fail-exit yes;
+            set ssl:verify-certificate no;
+            set ftp:passive-mode true;
+
+            open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
+            cd '$REMOTE_PATH';
+
+            find maps -type f;
+            find materials -type f;
+            find models -type f;
+            find sound -type f;
+            find resource/overviews -type f;
+
+            quit
+          " > _state/ftp/all.txt
+
+          # Normalize FTP lists
+          grep -E '^maps/.*\.(bsp|nav)$' _state/ftp/all.txt \
+            | sed 's#^maps/##' \
+            | grep -v -F -f _excludes/stock_maps_bsp.txt \
+            | sort -u > _state/ftp/maps.txt
+
+          grep -E '^materials/.*\.(vmt|vtf)$' _state/ftp/all.txt \
+            | sed 's#^materials/##' \
+            | sort -u > _state/ftp/materials.txt
+
+          grep -E '^models/.*\.(mdl|vvd|vtx)$' _state/ftp/all.txt \
+            | sed 's#^models/##' \
+            | sort -u > _state/ftp/models.txt
+
+          grep -E '^sound/.*\.(wav|mp3)$' _state/ftp/all.txt \
+            | sed 's#^sound/##' \
+            | sort -u > _state/ftp/sound.txt
+
+          grep -E '^resource/overviews/.*\.txt$' _state/ftp/all.txt \
+            | sed 's#^resource/overviews/##' \
+            | sort -u > _state/ftp/resource_overviews.txt
+
+          # Delete stale: repo - ftp
+          delete_stale() {
+            local d="$1"
+            local repo_list="_state/repo/${d}.txt"
+            local ftp_list="_state/ftp/${d}.txt"
+            local prefix="cstrike/${d}"
+            comm -23 "$repo_list" "$ftp_list" | while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              rm -f "${prefix}/${f}.bz2"
+            done
+          }
+
+          delete_stale maps
+          delete_stale materials
+          delete_stale models
+          delete_stale sound
+          delete_stale resource_overviews
+
+          # Always prune stock maps (bsp only)
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            rm -f "cstrike/maps/${f}.bz2"
+          done < _excludes/stock_maps_bsp.txt
 
       - name: Push Updates
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "FastDL: Sync (repo-excludes + stock-skiplist + overviews-only)"
+          commit_message: "FastDL: Sync (add + prune, stock-skiplist, overviews-only)"
           branch: main
-          file_pattern: "cstrike/** _excludes/**"
+          file_pattern: "cstrike/** _excludes/** _state/**"
