@@ -321,4 +321,4 @@ jobs:
         with:
           commit_message: "FastDL: Sync (rclone ftp, add + prune, overviews-only, bz2-only)"
           branch: main
-          file_pattern: "cstrike/** _excludes/** _state/**"
+          file_pattern: "cstrike/** _excludes/**"
