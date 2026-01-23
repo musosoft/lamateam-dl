@@ -241,40 +241,45 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "::group::Prune: build remote inventories via rclone lsjson"
           mkdir -p _state/remote _state/repo
 
-          # Build remote file list using rclone lsjson (works on plain FTP)
-          # Restrict to allowed types; no maps/*.res, no models/*.phy, only resource/overviews/*.txt.
           list_remote() {
             local remote_path="$1"
             local out_file="$2"
-            local prefix_strip="$3"
-            local regex="$4"
+            local regex="$3"
 
-            rclone lsjson ftp:"${remote_path}" --config rclone.conf --recursive --files-only \
-              | python3 - <<PY > "$out_file"
-            import json,sys,re
-            data=json.load(sys.stdin)
-            rx=re.compile(r"$regex")
-            for e in data:
-                p=e.get("Path","")
-                if rx.search(p):
-                    print(p)
-            PY
-            sort -u -o "$out_file" "$out_file"
+            rclone lsjson "ftp:${remote_path}" --config rclone.conf --recursive --files-only \
+              | python3 -c "import json,sys,re; rx=re.compile(r'$regex'); data=json.load(sys.stdin); [print(e.get('Path','')) for e in data if rx.search(e.get('Path',''))]" \
+              | sort -u > "$out_file"
+
+            echo "$(basename "$out_file"): $(wc -l < "$out_file")"
+            head -n 10 "$out_file" || true
+            echo "---"
           }
 
-          list_remote "${REMOTE_PATH}/maps" _state/remote/maps.txt "" r"\.(bsp|nav)$"
-          list_remote "${REMOTE_PATH}/materials" _state/remote/materials.txt "" r"\.(vmt|vtf)$"
-          list_remote "${REMOTE_PATH}/models" _state/remote/models.txt "" r"\.(mdl|vvd|vtx)$"
-          list_remote "${REMOTE_PATH}/sound" _state/remote/sound.txt "" r"\.(wav|mp3)$"
-          list_remote "${REMOTE_PATH}/resource/overviews" _state/remote/resource_overviews.txt "" r"\.txt$"
+          # maps: bsp/nav only (no .res)
+          list_remote "${REMOTE_PATH}/maps" _state/remote/maps.txt '\.(bsp|nav)$'
 
-          # Remove stock maps from remote set (bsp only)
-          grep -v -F -f _excludes/stock_maps_bsp.txt _state/remote/maps.txt > _state/remote/maps_filtered.txt
-          mv _state/remote/maps_filtered.txt _state/remote/maps.txt
+          # materials
+          list_remote "${REMOTE_PATH}/materials" _state/remote/materials.txt '\.(vmt|vtf)$'
 
-          # Repo inventory (bz2 minus suffix)
+          # models: no .phy
+          list_remote "${REMOTE_PATH}/models" _state/remote/models.txt '\.(mdl|vvd|vtx)$'
+
+          # sound
+          list_remote "${REMOTE_PATH}/sound" _state/remote/sound.txt '\.(wav|mp3)$'
+
+          # resource/overviews only
+          list_remote "${REMOTE_PATH}/resource/overviews" _state/remote/resource_overviews.txt '\.txt$'
+
+          # Remove stock/test maps from remote map set (bsp only)
+          grep -v -F -f _excludes/stock_maps_bsp.txt _state/remote/maps.txt > _state/remote/maps.filtered.txt || true
+          mv _state/remote/maps.filtered.txt _state/remote/maps.txt
+
+          echo "::endgroup::"
+
+          echo "::group::Prune: build repo inventories (bz2 minus suffix)"
           : > _state/repo/maps.txt
           : > _state/repo/materials.txt
           : > _state/repo/models.txt
@@ -296,16 +301,21 @@ jobs:
 
           for d in maps materials models sound resource_overviews; do
             sort -u -o "_state/repo/${d}.txt" "_state/repo/${d}.txt"
+            echo "repo_${d}.txt: $(wc -l < "_state/repo/${d}.txt")"
           done
+          echo "::endgroup::"
 
+          echo "::group::Prune: delete stale repo files (repo - remote)"
           delete_stale() {
             local d="$1"
             local repo_list="_state/repo/${d}.txt"
             local remote_list="_state/remote/${d}.txt"
             local prefix="cstrike/${d}"
 
+            # comm needs sorted inputs (we sorted above)
             comm -23 "$repo_list" "$remote_list" | while IFS= read -r f; do
               [ -z "$f" ] && continue
+              echo "DEL ${prefix}/${f}.bz2"
               rm -f "${prefix}/${f}.bz2"
             done
           }
@@ -316,11 +326,15 @@ jobs:
           delete_stale sound
           delete_stale resource_overviews
 
-          # Always prune stock maps (bsp only)
+          echo "::endgroup::"
+
+          echo "::group::Prune: always remove stock/test maps (bsp only)"
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            echo "DEL cstrike/maps/${f}.bz2"
             rm -f "cstrike/maps/${f}.bz2"
           done < _excludes/stock_maps_bsp.txt
+          echo "::endgroup::"
 
       - name: Push Updates
         uses: stefanzweifel/git-auto-commit-action@v5
