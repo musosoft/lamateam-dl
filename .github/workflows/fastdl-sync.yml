@@ -254,10 +254,6 @@ jobs:
           rclone lsf "ftp:${REMOTE_PATH}/resource/overviews" --config rclone.conf --recursive --files-only --format p \
             | grep -E '\.txt$' | sort -u > _state/remote/resource_overviews.txt
 
-          # Drop stock/test maps from remote map set
-          grep -v -F -f _excludes/stock_maps_bsp.txt _state/remote/maps.txt > _state/remote/maps.filtered.txt || true
-          mv _state/remote/maps.filtered.txt _state/remote/maps.txt
-
           echo "remote maps: $(wc -l < _state/remote/maps.txt)"
           echo "remote materials: $(wc -l < _state/remote/materials.txt)"
           echo "remote models: $(wc -l < _state/remote/models.txt)"
