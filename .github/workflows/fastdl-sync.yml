@@ -19,11 +19,15 @@ jobs:
       REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Repository (sparse)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           lfs: false
+          sparse-checkout: |
+            cstrike
+            _excludes
+          sparse-checkout-cone-mode: false
 
       - name: Install Dependencies
         run: |
@@ -99,7 +103,7 @@ jobs:
             echo "$(basename "$f"): $(wc -l < "$f")"
           done
 
-      - name: Mirror missing content from FTP (recursive-safe)
+      - name: Mirror missing content from FTP (fixed rule order)
         run: |
           set -euo pipefail
           : "${FTP_HOST:?}"
@@ -118,44 +122,42 @@ jobs:
             open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
             cd '$REMOTE_PATH';
 
-            # maps (usually flat, but allow dirs anyway)
+            # IMPORTANT: exclude-first, include-after, exclude-from-last (so it actually downloads)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
               --include-glob \"*/\" \
               --include-glob \"*.bsp\" --include-glob \"*.nav\" \
               --exclude-glob-from=_excludes/exclude_maps.txt \
-              --exclude-glob \"*\" \
               maps _ftp/maps;
 
-            # materials (needs recursion)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
               --include-glob \"*/\" \
               --include-glob \"*.vmt\" --include-glob \"*.vtf\" \
               --exclude-glob-from=_excludes/exclude_materials.txt \
-              --exclude-glob \"*\" \
               materials _ftp/materials;
 
-            # models (no .phy)
+            # models: no .phy
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
               --include-glob \"*/\" \
               --include-glob \"*.mdl\" --include-glob \"*.vvd\" --include-glob \"*.vtx\" \
               --exclude-glob-from=_excludes/exclude_models.txt \
-              --exclude-glob \"*\" \
               models _ftp/models;
 
-            # sound (needs recursion)
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
               --include-glob \"*/\" \
               --include-glob \"*.wav\" --include-glob \"*.mp3\" \
               --exclude-glob-from=_excludes/exclude_sound.txt \
-              --exclude-glob \"*\" \
               sound _ftp/sound;
 
-            # resource/overviews only (recursion safe)
+            # resource/overviews only
             mirror --continue --only-newer --parallel=3 --verbose=1 \
+              --exclude-glob \"*\" \
               --include-glob \"*/\" \
               --include-glob \"*.txt\" \
               --exclude-glob-from=_excludes/exclude_resource_overviews.txt \
-              --exclude-glob \"*\" \
               resource/overviews _ftp/resource/overviews;
 
             quit
@@ -191,7 +193,7 @@ jobs:
             -path "*/resource/overviews/*.txt" \
           \) -delete || true
 
-      - name: Sanitize repo (remove stock maps every run, stock list only)
+      - name: Sanitize repo (remove stock maps every run, bsp only)
         run: |
           set -euo pipefail
           if [ -d cstrike/maps ]; then
