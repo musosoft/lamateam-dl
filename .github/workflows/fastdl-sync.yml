@@ -231,43 +231,55 @@ jobs:
             sort -u -o "_state/repo/${d}.txt" "_state/repo/${d}.txt"
           done
 
-          # FTP inventory via lftp find (no wildcards, no 550)
-          lftp -c "
-            set cmd:fail-exit yes;
+          # FTP inventory via cls only (no find, no recursion globs)
+          # NOTE: cmd:fail-exit no so empty globs do not fail the job.
+          lftp -e "
+            set cmd:fail-exit no;
             set ssl:verify-certificate no;
             set ftp:passive-mode true;
+            set net:max-retries 2;
+            set net:timeout 10;
 
             open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
             cd '$REMOTE_PATH';
 
-            find maps -type f;
-            find materials -type f;
-            find models -type f;
-            find sound -type f;
-            find resource/overviews -type f;
+            cls -1 maps/*.bsp;
+            cls -1 maps/*.nav;
+
+            cls -1 materials/*.vmt;
+            cls -1 materials/*.vtf;
+
+            cls -1 models/*.mdl;
+            cls -1 models/*.vvd;
+            cls -1 models/*.vtx;
+
+            cls -1 sound/*.wav;
+            cls -1 sound/*.mp3;
+
+            cls -1 resource/overviews/*.txt;
 
             quit
-          " > _state/ftp/all.txt
+          " > _state/ftp/raw_listing_prune.txt
 
-          # Normalize FTP lists
-          grep -E '^maps/.*\.(bsp|nav)$' _state/ftp/all.txt \
+          # Normalize FTP lists (relative)
+          grep -E '^maps/.*\.(bsp|nav)$' _state/ftp/raw_listing_prune.txt \
             | sed 's#^maps/##' \
             | grep -v -F -f _excludes/stock_maps_bsp.txt \
             | sort -u > _state/ftp/maps.txt
 
-          grep -E '^materials/.*\.(vmt|vtf)$' _state/ftp/all.txt \
+          grep -E '^materials/.*\.(vmt|vtf)$' _state/ftp/raw_listing_prune.txt \
             | sed 's#^materials/##' \
             | sort -u > _state/ftp/materials.txt
 
-          grep -E '^models/.*\.(mdl|vvd|vtx)$' _state/ftp/all.txt \
+          grep -E '^models/.*\.(mdl|vvd|vtx)$' _state/ftp/raw_listing_prune.txt \
             | sed 's#^models/##' \
             | sort -u > _state/ftp/models.txt
 
-          grep -E '^sound/.*\.(wav|mp3)$' _state/ftp/all.txt \
+          grep -E '^sound/.*\.(wav|mp3)$' _state/ftp/raw_listing_prune.txt \
             | sed 's#^sound/##' \
             | sort -u > _state/ftp/sound.txt
 
-          grep -E '^resource/overviews/.*\.txt$' _state/ftp/all.txt \
+          grep -E '^resource/overviews/.*\.txt$' _state/ftp/raw_listing_prune.txt \
             | sed 's#^resource/overviews/##' \
             | sort -u > _state/ftp/resource_overviews.txt
 
