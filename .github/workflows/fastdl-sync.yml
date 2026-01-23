@@ -32,36 +32,36 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y lftp bzip2 rsync
+          sudo apt-get install -y bzip2 rsync rclone
 
-      - name: Build exclude lists from repo + stock map skiplist
+      - name: Build stock skiplist + repo exclude lists
         run: |
           set -euo pipefail
 
-          mkdir -p _excludes
+          mkdir -p _excludes _state
 
           : > _excludes/stock_maps_bsp.txt
-          cat >> _excludes/stock_maps_bsp.txt <<'EOF'
-          test_speakers.bsp
-          test_hardware.bsp
-          de_train.bsp
-          de_tides.bsp
-          de_prodigy.bsp
-          de_port.bsp
-          de_piranesi.bsp
-          de_nuke.bsp
-          de_inferno.bsp
-          de_dust2.bsp
-          de_dust.bsp
-          de_chateau.bsp
-          de_cbble.bsp
-          de_aztec.bsp
-          cs_office.bsp
-          cs_militia.bsp
-          cs_italy.bsp
-          cs_havana.bsp
-          cs_compound.bsp
-          cs_assault.bsp
+          cat <<'EOF' | sed -E 's/^[[:space:]]+//; /^[[:space:]]*$/d' >> _excludes/stock_maps_bsp.txt
+            test_speakers.bsp
+            test_hardware.bsp
+            de_train.bsp
+            de_tides.bsp
+            de_prodigy.bsp
+            de_port.bsp
+            de_piranesi.bsp
+            de_nuke.bsp
+            de_inferno.bsp
+            de_dust2.bsp
+            de_dust.bsp
+            de_chateau.bsp
+            de_cbble.bsp
+            de_aztec.bsp
+            cs_office.bsp
+            cs_militia.bsp
+            cs_italy.bsp
+            cs_havana.bsp
+            cs_compound.bsp
+            cs_assault.bsp
           EOF
           sort -u -o _excludes/stock_maps_bsp.txt _excludes/stock_maps_bsp.txt
 
@@ -101,7 +101,7 @@ jobs:
             echo "$(basename "$f"): $(wc -l < "$f")"
           done
 
-      - name: Mirror missing content from FTP (recursive-safe)
+      - name: Configure rclone (plain FTP)
         run: |
           set -euo pipefail
           : "${FTP_HOST:?}"
@@ -109,54 +109,103 @@ jobs:
           : "${FTP_PASS:?}"
           : "${REMOTE_PATH:?}"
 
+          cat > rclone.conf <<EOF
+          [ftp]
+          type = ftp
+          host = ${FTP_HOST}
+          user = ${FTP_USER}
+          pass = $(rclone obscure "${FTP_PASS}")
+          EOF
+
+      - name: Sync missing from FTP -> _ftp (filtered)
+        run: |
+          set -euo pipefail
           rm -rf _ftp _out
           mkdir -p _ftp/maps _ftp/materials _ftp/models _ftp/sound _ftp/resource/overviews
 
-          lftp -c "
-            set cmd:fail-exit yes;
-            set ssl:verify-certificate no;
-            set ftp:passive-mode true;
+          # NOTE:
+          # - We do NOT sync maps/*.res (never downloaded)
+          # - models: no .phy
+          # - resource: only overviews/*.txt
+          # - We use repo excludes to avoid re-downloading, and stock map excludes to avoid bloat.
+          #
+          # rclone filter rules are applied top-down. Use: include allowed, exclude everything else.
 
-            open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
-            cd '$REMOTE_PATH';
+          build_filter_file_maps() {
+            : > _state/filter_maps.txt
+            echo "+ */" >> _state/filter_maps.txt
+            echo "+ *.bsp" >> _state/filter_maps.txt
+            echo "+ *.nav" >> _state/filter_maps.txt
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "- $f" >> _state/filter_maps.txt
+            done < _excludes/exclude_maps.txt
+            echo "- *" >> _state/filter_maps.txt
+          }
 
-            mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
-              --include-glob \"*/\" \
-              --include-glob \"*.bsp\" --include-glob \"*.nav\" \
-              --exclude-glob-from=_excludes/exclude_maps.txt \
-              maps _ftp/maps;
+          build_filter_file_materials() {
+            : > _state/filter_materials.txt
+            echo "+ */" >> _state/filter_materials.txt
+            echo "+ *.vmt" >> _state/filter_materials.txt
+            echo "+ *.vtf" >> _state/filter_materials.txt
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "- $f" >> _state/filter_materials.txt
+            done < _excludes/exclude_materials.txt
+            echo "- *" >> _state/filter_materials.txt
+          }
 
-            mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
-              --include-glob \"*/\" \
-              --include-glob \"*.vmt\" --include-glob \"*.vtf\" \
-              --exclude-glob-from=_excludes/exclude_materials.txt \
-              materials _ftp/materials;
+          build_filter_file_models() {
+            : > _state/filter_models.txt
+            echo "+ */" >> _state/filter_models.txt
+            echo "+ *.mdl" >> _state/filter_models.txt
+            echo "+ *.vvd" >> _state/filter_models.txt
+            echo "+ *.vtx" >> _state/filter_models.txt
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "- $f" >> _state/filter_models.txt
+            done < _excludes/exclude_models.txt
+            echo "- *" >> _state/filter_models.txt
+          }
 
-            mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
-              --include-glob \"*/\" \
-              --include-glob \"*.mdl\" --include-glob \"*.vvd\" --include-glob \"*.vtx\" \
-              --exclude-glob-from=_excludes/exclude_models.txt \
-              models _ftp/models;
+          build_filter_file_sound() {
+            : > _state/filter_sound.txt
+            echo "+ */" >> _state/filter_sound.txt
+            echo "+ *.wav" >> _state/filter_sound.txt
+            echo "+ *.mp3" >> _state/filter_sound.txt
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "- $f" >> _state/filter_sound.txt
+            done < _excludes/exclude_sound.txt
+            echo "- *" >> _state/filter_sound.txt
+          }
 
-            mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
-              --include-glob \"*/\" \
-              --include-glob \"*.wav\" --include-glob \"*.mp3\" \
-              --exclude-glob-from=_excludes/exclude_sound.txt \
-              sound _ftp/sound;
+          build_filter_file_overviews() {
+            : > _state/filter_overviews.txt
+            echo "+ */" >> _state/filter_overviews.txt
+            echo "+ *.txt" >> _state/filter_overviews.txt
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "- $f" >> _state/filter_overviews.txt
+            done < _excludes/exclude_resource_overviews.txt
+            echo "- *" >> _state/filter_overviews.txt
+          }
 
-            mirror --continue --only-newer --parallel=3 --verbose=1 \
-              --exclude-glob \"*\" \
-              --include-glob \"*/\" \
-              --include-glob \"*.txt\" \
-              --exclude-glob-from=_excludes/exclude_resource_overviews.txt \
-              resource/overviews _ftp/resource/overviews;
+          build_filter_file_maps
+          build_filter_file_materials
+          build_filter_file_models
+          build_filter_file_sound
+          build_filter_file_overviews
 
-            quit
-          "
+          # Use --ignore-existing to avoid pulling files we already have; rely on prune step to delete.
+          # Use conservative transfers to avoid stressing FTP.
+          common_flags="--config rclone.conf --transfers 2 --checkers 4 --contimeout 10s --timeout 30s --retries 2 --low-level-retries 2 --stats 10s --ignore-existing"
+
+          rclone copy ftp:"${REMOTE_PATH}/maps" _ftp/maps --filter-from _state/filter_maps.txt $common_flags
+          rclone copy ftp:"${REMOTE_PATH}/materials" _ftp/materials --filter-from _state/filter_materials.txt $common_flags
+          rclone copy ftp:"${REMOTE_PATH}/models" _ftp/models --filter-from _state/filter_models.txt $common_flags
+          rclone copy ftp:"${REMOTE_PATH}/sound" _ftp/sound --filter-from _state/filter_sound.txt $common_flags
+          rclone copy ftp:"${REMOTE_PATH}/resource/overviews" _ftp/resource/overviews --filter-from _state/filter_overviews.txt $common_flags
 
       - name: Compress to bz2-only and merge into repo
         run: |
@@ -179,6 +228,7 @@ jobs:
           mkdir -p cstrike
           rsync -a _out/ cstrike/
 
+          # enforce bz2-only
           find cstrike -type f \( \
             -name "*.bsp" -o -name "*.nav" -o \
             -name "*.vmt" -o -name "*.vtf" -o \
@@ -187,17 +237,44 @@ jobs:
             -path "*/resource/overviews/*.txt" \
           \) -delete || true
 
-      - name: Prune repo files not present on FTP (and always prune stock maps)
+      - name: Prune repo files deleted on FTP (filtered listing)
         run: |
           set -euo pipefail
-          : "${FTP_HOST:?}"
-          : "${FTP_USER:?}"
-          : "${FTP_PASS:?}"
-          : "${REMOTE_PATH:?}"
 
-          mkdir -p _state/ftp _state/repo
+          mkdir -p _state/remote _state/repo
 
-          # Repo inventory (bz2 minus suffix, keep subpaths)
+          # Build remote file list using rclone lsjson (works on plain FTP)
+          # Restrict to allowed types; no maps/*.res, no models/*.phy, only resource/overviews/*.txt.
+          list_remote() {
+            local remote_path="$1"
+            local out_file="$2"
+            local prefix_strip="$3"
+            local regex="$4"
+
+            rclone lsjson ftp:"${remote_path}" --config rclone.conf --recursive --files-only \
+              | python3 - <<PY > "$out_file"
+            import json,sys,re
+            data=json.load(sys.stdin)
+            rx=re.compile(r"$regex")
+            for e in data:
+                p=e.get("Path","")
+                if rx.search(p):
+                    print(p)
+            PY
+            sort -u -o "$out_file" "$out_file"
+          }
+
+          list_remote "${REMOTE_PATH}/maps" _state/remote/maps.txt "" r"\.(bsp|nav)$"
+          list_remote "${REMOTE_PATH}/materials" _state/remote/materials.txt "" r"\.(vmt|vtf)$"
+          list_remote "${REMOTE_PATH}/models" _state/remote/models.txt "" r"\.(mdl|vvd|vtx)$"
+          list_remote "${REMOTE_PATH}/sound" _state/remote/sound.txt "" r"\.(wav|mp3)$"
+          list_remote "${REMOTE_PATH}/resource/overviews" _state/remote/resource_overviews.txt "" r"\.txt$"
+
+          # Remove stock maps from remote set (bsp only)
+          grep -v -F -f _excludes/stock_maps_bsp.txt _state/remote/maps.txt > _state/remote/maps_filtered.txt
+          mv _state/remote/maps_filtered.txt _state/remote/maps.txt
+
+          # Repo inventory (bz2 minus suffix)
           : > _state/repo/maps.txt
           : > _state/repo/materials.txt
           : > _state/repo/models.txt
@@ -208,21 +285,11 @@ jobs:
             find cstrike -type f -name "*.bz2" -print0 | while IFS= read -r -d '' f; do
               rel="${f#cstrike/}"
               case "$rel" in
-                maps/*)
-                  echo "${rel#maps/}" | sed 's/\.bz2$//' >> _state/repo/maps.txt
-                  ;;
-                materials/*)
-                  echo "${rel#materials/}" | sed 's/\.bz2$//' >> _state/repo/materials.txt
-                  ;;
-                models/*)
-                  echo "${rel#models/}" | sed 's/\.bz2$//' >> _state/repo/models.txt
-                  ;;
-                sound/*)
-                  echo "${rel#sound/}" | sed 's/\.bz2$//' >> _state/repo/sound.txt
-                  ;;
-                resource/overviews/*)
-                  echo "${rel#resource/overviews/}" | sed 's/\.bz2$//' >> _state/repo/resource_overviews.txt
-                  ;;
+                maps/*)               echo "${rel#maps/}"               | sed 's/\.bz2$//' >> _state/repo/maps.txt ;;
+                materials/*)          echo "${rel#materials/}"          | sed 's/\.bz2$//' >> _state/repo/materials.txt ;;
+                models/*)             echo "${rel#models/}"             | sed 's/\.bz2$//' >> _state/repo/models.txt ;;
+                sound/*)              echo "${rel#sound/}"              | sed 's/\.bz2$//' >> _state/repo/sound.txt ;;
+                resource/overviews/*) echo "${rel#resource/overviews/}" | sed 's/\.bz2$//' >> _state/repo/resource_overviews.txt ;;
               esac
             done
           fi
@@ -231,65 +298,13 @@ jobs:
             sort -u -o "_state/repo/${d}.txt" "_state/repo/${d}.txt"
           done
 
-          # FTP inventory via cls only (no find, no recursion globs)
-          # NOTE: cmd:fail-exit no so empty globs do not fail the job.
-          lftp -e "
-            set cmd:fail-exit no;
-            set ssl:verify-certificate no;
-            set ftp:passive-mode true;
-            set net:max-retries 2;
-            set net:timeout 10;
-
-            open -u '$FTP_USER','$FTP_PASS' '$FTP_HOST';
-            cd '$REMOTE_PATH';
-
-            cls -1 maps/*.bsp;
-            cls -1 maps/*.nav;
-
-            cls -1 materials/*.vmt;
-            cls -1 materials/*.vtf;
-
-            cls -1 models/*.mdl;
-            cls -1 models/*.vvd;
-            cls -1 models/*.vtx;
-
-            cls -1 sound/*.wav;
-            cls -1 sound/*.mp3;
-
-            cls -1 resource/overviews/*.txt;
-
-            quit
-          " > _state/ftp/raw_listing_prune.txt
-
-          # Normalize FTP lists (relative)
-          grep -E '^maps/.*\.(bsp|nav)$' _state/ftp/raw_listing_prune.txt \
-            | sed 's#^maps/##' \
-            | grep -v -F -f _excludes/stock_maps_bsp.txt \
-            | sort -u > _state/ftp/maps.txt
-
-          grep -E '^materials/.*\.(vmt|vtf)$' _state/ftp/raw_listing_prune.txt \
-            | sed 's#^materials/##' \
-            | sort -u > _state/ftp/materials.txt
-
-          grep -E '^models/.*\.(mdl|vvd|vtx)$' _state/ftp/raw_listing_prune.txt \
-            | sed 's#^models/##' \
-            | sort -u > _state/ftp/models.txt
-
-          grep -E '^sound/.*\.(wav|mp3)$' _state/ftp/raw_listing_prune.txt \
-            | sed 's#^sound/##' \
-            | sort -u > _state/ftp/sound.txt
-
-          grep -E '^resource/overviews/.*\.txt$' _state/ftp/raw_listing_prune.txt \
-            | sed 's#^resource/overviews/##' \
-            | sort -u > _state/ftp/resource_overviews.txt
-
-          # Delete stale: repo - ftp
           delete_stale() {
             local d="$1"
             local repo_list="_state/repo/${d}.txt"
-            local ftp_list="_state/ftp/${d}.txt"
+            local remote_list="_state/remote/${d}.txt"
             local prefix="cstrike/${d}"
-            comm -23 "$repo_list" "$ftp_list" | while IFS= read -r f; do
+
+            comm -23 "$repo_list" "$remote_list" | while IFS= read -r f; do
               [ -z "$f" ] && continue
               rm -f "${prefix}/${f}.bz2"
             done
@@ -310,6 +325,6 @@ jobs:
       - name: Push Updates
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "FastDL: Sync (add + prune, stock-skiplist, overviews-only)"
+          commit_message: "FastDL: Sync (rclone ftp, add + prune, overviews-only, bz2-only)"
           branch: main
           file_pattern: "cstrike/** _excludes/** _state/**"
