@@ -78,6 +78,7 @@ de_dust2_xmas_2023.bsp
 de_dust2_xmas_2023.nav
 de_dust3_lt.bsp
 de_dust3_lt.nav
+de_dust_small_lt2025.bsp
 de_dust_small_lt2025.nav
 de_frost.bsp
 de_glacier.nav
