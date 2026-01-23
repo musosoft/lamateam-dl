@@ -1,4 +1,4 @@
-name: Smart FastDL Sync
+name: Smart FastDL Sync (rclone)
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ jobs:
       REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Repository (sparse)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -68,8 +68,8 @@ jobs:
           : > _excludes/exclude_maps.txt
           : > _excludes/exclude_materials.txt
           : > _excludes/exclude_models.txt
-          : > _excludes/exclude_sound.txt
           : > _excludes/exclude_resource_overviews.txt
+          : > _excludes/exclude_sound.txt
 
           cat _excludes/stock_maps_bsp.txt >> _excludes/exclude_maps.txt
 
@@ -120,16 +120,10 @@ jobs:
       - name: Sync missing from FTP -> _ftp (filtered)
         run: |
           set -euo pipefail
+
           rm -rf _ftp _out
           mkdir -p _ftp/maps _ftp/materials _ftp/models _ftp/sound _ftp/resource/overviews
-
-          # NOTE:
-          # - We do NOT sync maps/*.res (never downloaded)
-          # - models: no .phy
-          # - resource: only overviews/*.txt
-          # - We use repo excludes to avoid re-downloading, and stock map excludes to avoid bloat.
-          #
-          # rclone filter rules are applied top-down. Use: include allowed, exclude everything else.
+          mkdir -p _state
 
           build_filter_file_maps() {
             : > _state/filter_maps.txt
@@ -197,15 +191,13 @@ jobs:
           build_filter_file_sound
           build_filter_file_overviews
 
-          # Use --ignore-existing to avoid pulling files we already have; rely on prune step to delete.
-          # Use conservative transfers to avoid stressing FTP.
           common_flags="--config rclone.conf --transfers 2 --checkers 4 --contimeout 10s --timeout 30s --retries 2 --low-level-retries 2 --stats 10s --ignore-existing"
 
-          rclone copy ftp:"${REMOTE_PATH}/maps" _ftp/maps --filter-from _state/filter_maps.txt $common_flags
-          rclone copy ftp:"${REMOTE_PATH}/materials" _ftp/materials --filter-from _state/filter_materials.txt $common_flags
-          rclone copy ftp:"${REMOTE_PATH}/models" _ftp/models --filter-from _state/filter_models.txt $common_flags
-          rclone copy ftp:"${REMOTE_PATH}/sound" _ftp/sound --filter-from _state/filter_sound.txt $common_flags
-          rclone copy ftp:"${REMOTE_PATH}/resource/overviews" _ftp/resource/overviews --filter-from _state/filter_overviews.txt $common_flags
+          rclone copy "ftp:${REMOTE_PATH}/maps" _ftp/maps --filter-from _state/filter_maps.txt $common_flags
+          rclone copy "ftp:${REMOTE_PATH}/materials" _ftp/materials --filter-from _state/filter_materials.txt $common_flags
+          rclone copy "ftp:${REMOTE_PATH}/models" _ftp/models --filter-from _state/filter_models.txt $common_flags
+          rclone copy "ftp:${REMOTE_PATH}/sound" _ftp/sound --filter-from _state/filter_sound.txt $common_flags
+          rclone copy "ftp:${REMOTE_PATH}/resource/overviews" _ftp/resource/overviews --filter-from _state/filter_overviews.txt $common_flags
 
       - name: Compress to bz2-only and merge into repo
         run: |
@@ -228,7 +220,6 @@ jobs:
           mkdir -p cstrike
           rsync -a _out/ cstrike/
 
-          # enforce bz2-only
           find cstrike -type f \( \
             -name "*.bsp" -o -name "*.nav" -o \
             -name "*.vmt" -o -name "*.vtf" -o \
@@ -237,49 +228,40 @@ jobs:
             -path "*/resource/overviews/*.txt" \
           \) -delete || true
 
-      - name: Prune repo files deleted on FTP (filtered listing)
+      - name: Prune repo files deleted on FTP (correct path compare)
         run: |
           set -euo pipefail
 
-          echo "::group::Prune: build remote inventories via rclone lsjson"
           mkdir -p _state/remote _state/repo
 
-          list_remote() {
-            local remote_path="$1"
-            local out_file="$2"
-            local regex="$3"
+          echo "::group::Remote sets (rclone lsf)"
+          rclone lsf "ftp:${REMOTE_PATH}/maps" --config rclone.conf --recursive --files-only --format p \
+            | grep -E '\.(bsp|nav)$' | sort -u > _state/remote/maps.txt
 
-            rclone lsjson "ftp:${remote_path}" --config rclone.conf --recursive --files-only \
-              | python3 -c "import json,sys,re; rx=re.compile(r'$regex'); data=json.load(sys.stdin); [print(e.get('Path','')) for e in data if rx.search(e.get('Path',''))]" \
-              | sort -u > "$out_file"
+          rclone lsf "ftp:${REMOTE_PATH}/materials" --config rclone.conf --recursive --files-only --format p \
+            | grep -E '\.(vmt|vtf)$' | sort -u > _state/remote/materials.txt
 
-            echo "$(basename "$out_file"): $(wc -l < "$out_file")"
-            head -n 10 "$out_file" || true
-            echo "---"
-          }
+          rclone lsf "ftp:${REMOTE_PATH}/models" --config rclone.conf --recursive --files-only --format p \
+            | grep -E '\.(mdl|vvd|vtx)$' | sort -u > _state/remote/models.txt
 
-          # maps: bsp/nav only (no .res)
-          list_remote "${REMOTE_PATH}/maps" _state/remote/maps.txt '\.(bsp|nav)$'
+          rclone lsf "ftp:${REMOTE_PATH}/sound" --config rclone.conf --recursive --files-only --format p \
+            | grep -E '\.(wav|mp3)$' | sort -u > _state/remote/sound.txt
 
-          # materials
-          list_remote "${REMOTE_PATH}/materials" _state/remote/materials.txt '\.(vmt|vtf)$'
+          rclone lsf "ftp:${REMOTE_PATH}/resource/overviews" --config rclone.conf --recursive --files-only --format p \
+            | grep -E '\.txt$' | sort -u > _state/remote/resource_overviews.txt
 
-          # models: no .phy
-          list_remote "${REMOTE_PATH}/models" _state/remote/models.txt '\.(mdl|vvd|vtx)$'
-
-          # sound
-          list_remote "${REMOTE_PATH}/sound" _state/remote/sound.txt '\.(wav|mp3)$'
-
-          # resource/overviews only
-          list_remote "${REMOTE_PATH}/resource/overviews" _state/remote/resource_overviews.txt '\.txt$'
-
-          # Remove stock/test maps from remote map set (bsp only)
+          # Drop stock/test maps from remote map set
           grep -v -F -f _excludes/stock_maps_bsp.txt _state/remote/maps.txt > _state/remote/maps.filtered.txt || true
           mv _state/remote/maps.filtered.txt _state/remote/maps.txt
 
+          echo "remote maps: $(wc -l < _state/remote/maps.txt)"
+          echo "remote materials: $(wc -l < _state/remote/materials.txt)"
+          echo "remote models: $(wc -l < _state/remote/models.txt)"
+          echo "remote sound: $(wc -l < _state/remote/sound.txt)"
+          echo "remote overviews: $(wc -l < _state/remote/resource_overviews.txt)"
           echo "::endgroup::"
 
-          echo "::group::Prune: build repo inventories (bz2 minus suffix)"
+          echo "::group::Repo sets (bz2 minus suffix)"
           : > _state/repo/maps.txt
           : > _state/repo/materials.txt
           : > _state/repo/models.txt
@@ -301,18 +283,17 @@ jobs:
 
           for d in maps materials models sound resource_overviews; do
             sort -u -o "_state/repo/${d}.txt" "_state/repo/${d}.txt"
-            echo "repo_${d}.txt: $(wc -l < "_state/repo/${d}.txt")"
+            echo "repo $d: $(wc -l < "_state/repo/${d}.txt")"
           done
           echo "::endgroup::"
 
-          echo "::group::Prune: delete stale repo files (repo - remote)"
+          echo "::group::Delete stale (repo - remote)"
           delete_stale() {
             local d="$1"
             local repo_list="_state/repo/${d}.txt"
             local remote_list="_state/remote/${d}.txt"
             local prefix="cstrike/${d}"
 
-            # comm needs sorted inputs (we sorted above)
             comm -23 "$repo_list" "$remote_list" | while IFS= read -r f; do
               [ -z "$f" ] && continue
               echo "DEL ${prefix}/${f}.bz2"
@@ -325,10 +306,9 @@ jobs:
           delete_stale models
           delete_stale sound
           delete_stale resource_overviews
-
           echo "::endgroup::"
 
-          echo "::group::Prune: always remove stock/test maps (bsp only)"
+          echo "::group::Always prune stock/test maps"
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             echo "DEL cstrike/maps/${f}.bz2"
