@@ -5,6 +5,3 @@ homicidalape/One Heavy February.wav
 homicidalape/Sweet.wav
 homicidalape/schmaltzherring1.wav
 nippersounds/nm_goodbadugly.wav
-nippersounds/nm_xmas_bells.wav
-nippersounds/nm_xmas_futuramahoho.wav
-nippersounds/nm_xmas_snl.wav

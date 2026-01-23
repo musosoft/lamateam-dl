@@ -2,8 +2,6 @@ $2000$.bsp
 $2000$.nav
 3mc_training.bsp
 3mc_training.nav
-aim_$2011$_lt.bsp
-aim_$2011$_lt.nav
 aim_awp-ak-colt.bsp
 aim_awp-ak-colt.nav
 aim_deagle7k.bsp
@@ -24,13 +22,10 @@ cs_crackhouse_hg_a2.bsp
 cs_crackhouse_hg_a2.nav
 cs_estate.bsp
 cs_estate.nav
-cs_frozen.bsp
 cs_havana.bsp
 cs_italy.bsp
 cs_militia.bsp
 cs_office.bsp
-cs_office_xmasparty.nav
-cs_siege_2010.nav
 de_alexandra2.bsp
 de_alexandra2.nav
 de_anubis_css.bsp
@@ -39,7 +34,6 @@ de_apehouse.bsp
 de_apehouse.nav
 de_arabic2_lt.bsp
 de_arabic2_lt.nav
-de_aurelia.bsp
 de_aztec.bsp
 de_blitz_ukcs.bsp
 de_blitz_ukcs.nav
@@ -52,7 +46,6 @@ de_carpediem_arena.nav
 de_casablanca_sunbeam.bsp
 de_casablanca_sunbeam.nav
 de_cbble.bsp
-de_cbble_go.nav
 de_cefalu.bsp
 de_cevo_hazard.bsp
 de_cevo_hazard.nav
@@ -70,19 +63,13 @@ de_deltamill2.bsp
 de_deltamill2.nav
 de_desert_atrocity_v3.bsp
 de_desert_atrocity_v3.nav
-de_dolls_2008_fixed.bsp
-de_dolls_2008_fixed.nav
 de_dust.bsp
 de_dust2.bsp
-de_dust2_xmas_2023.bsp
-de_dust2_xmas_2023.nav
 de_dust3_lt.bsp
 de_dust3_lt.nav
 de_dust_small_lt2025.bsp
 de_dust_small_lt2025.nav
 de_frost.bsp
-de_glacier.nav
-de_grit3.bsp
 de_grit3.nav
 de_hiekka_v3.bsp
 de_hiekka_v3.nav
@@ -177,4 +164,3 @@ knas_Sandland_CSS.bsp
 knas_Sandland_CSS.nav
 test_hardware.bsp
 test_speakers.bsp
-xmas_nipperhouse.nav
