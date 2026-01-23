@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "0 4 * * *"
 
+concurrency:
+  group: fastdl-sync-main
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -316,9 +320,38 @@ jobs:
           done < _excludes/stock_maps_bsp.txt
           echo "::endgroup::"
 
-      - name: Push Updates
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "FastDL: Sync (rclone ftp, add + prune, overviews-only, bz2-only)"
-          branch: main
-          file_pattern: "cstrike/** _excludes/**"
+      - name: Commit and push (rebase-safe)
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add cstrike _excludes || true
+
+          if git diff --cached --quiet; then
+            echo "No staged changes."
+            exit 0
+          fi
+
+          git commit -m "FastDL: Sync (rclone ftp, add + prune, overviews-only, bz2-only)"
+
+          # Rebase on latest origin/main and push; retry once on race
+          for i in 1 2; do
+            git fetch origin main
+            git rebase origin/main || (git rebase --abort && exit 1)
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push rejected (non-fast-forward). Retrying ($i/2)..."
+            sleep 2
+          done
+
+          echo "Push failed after retries."
+          exit 1
+
