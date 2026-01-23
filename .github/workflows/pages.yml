@@ -2,7 +2,7 @@ name: Pages
 
 on:
   workflow_run:
-    workflows: ["Smart FastDL Sync (rclone)"]
+    workflows: ["Smart FastDL Sync (Turbo)"]
     types: [completed]
 
 permissions:
